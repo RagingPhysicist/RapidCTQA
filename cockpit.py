@@ -34,7 +34,7 @@ class ClinicalTriageApp(ctk.CTk):
         self.geometry("1100x800")
         ctk.set_appearance_mode("dark")
         
-        self.engine = QAEngine()
+        self.engine = QAEngine("ctqa.yaml")
         self.current_series_path = None
         self.current_series_uid = None
 
@@ -95,8 +95,7 @@ class ClinicalTriageApp(ctk.CTk):
         
         # Run Analysis
         try:
-            datasets = [pydicom.dcmread(f) for f in files]
-            result = self.engine.analyze_series(datasets)
+            result = self.engine.analyze_series(files)
             
             self.flag_box.delete("0.0", "end")
             self.flag_box.insert("end", f"PATIENT: {result.patient_name}\n")
