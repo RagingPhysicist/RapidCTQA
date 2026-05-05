@@ -87,6 +87,7 @@ class ClinicalTriageApp(ctk.CTk):
         self.engine = QAEngine("ctqa.yaml")
         self.current_series_path = None
         self.current_series_uid = None
+        self.after_id = None
         
         # Load WL Presets
         try:
@@ -143,6 +144,13 @@ class ClinicalTriageApp(ctk.CTk):
                 self.flag_box.insert("end", f"Error: Series {series_uid} not found.\n")
         else:
             self.check_for_scans()
+            
+        self.protocol("WM_DELETE_WINDOW", self.on_closing)
+
+    def on_closing(self):
+        if self.after_id:
+            self.after_cancel(self.after_id)
+        self.destroy()
 
     def _on_wl_change(self, preset_name):
         if preset_name in self.wl_presets:
@@ -160,7 +168,7 @@ class ClinicalTriageApp(ctk.CTk):
                     self.load_series(s_path)
                     break
         
-        self.after(5000, self.check_for_scans)
+        self.after_id = self.after(5000, self.check_for_scans)
 
     def load_series(self, series_path):
         self.current_series_path = series_path
