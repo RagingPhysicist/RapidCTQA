@@ -13,19 +13,51 @@ os.makedirs(EXPORT_DIR, exist_ok=True)
 class DICOMViewer(ctk.CTkFrame):
     def __init__(self, master, **kwargs):
         super().__init__(master, **kwargs)
-        self.fig, self.ax = plt.subplots(figsize=(5, 5), facecolor='#2b2b2b')
+        self.files = []
+        self.current_index = 0
+        
+        self.fig, self.ax = plt.subplots(figsize=(5, 5), facecolor='#1a1a1a')
         self.canvas = FigureCanvasTkAgg(self.fig, master=self)
         self.canvas.get_tk_widget().pack(fill="both", expand=True)
+        
+        # Slider for navigation
+        self.slider = ctk.CTkSlider(self, from_=0, to=100, command=self._on_slider_move)
+        self.slider.pack(fill="x", padx=20, pady=10)
+        self.slider.set(0)
 
-    def display_slice(self, file_path):
+        # Bind mouse wheel
+        self.canvas.get_tk_widget().bind("<MouseWheel>", self._on_mousewheel)
+
+    def load_series(self, files):
+        self.files = sorted(files) # Sort by filename (usually contains instance number)
+        if self.files:
+            self.slider.configure(from_=0, to=len(self.files) - 1)
+            self.display_slice(len(self.files) // 2)
+
+    def display_slice(self, index):
+        if not self.files: return
+        self.current_index = int(index)
+        self.slider.set(self.current_index)
+        
         try:
-            ds = pydicom.dcmread(file_path)
+            ds = pydicom.dcmread(self.files[self.current_index])
             self.ax.clear()
             self.ax.imshow(ds.pixel_array, cmap='gray')
+            self.ax.set_title(f"Slice: {self.current_index + 1} / {len(self.files)}", color="white")
             self.ax.axis('off')
             self.canvas.draw()
         except Exception as e:
             print(f"Viewer Error: {e}")
+
+    def _on_slider_move(self, value):
+        self.display_slice(int(value))
+
+    def _on_mousewheel(self, event):
+        if event.delta > 0:
+            new_idx = max(0, self.current_index - 1)
+        else:
+            new_idx = min(len(self.files) - 1, self.current_index + 1)
+        self.display_slice(new_idx)
 
 class ClinicalTriageApp(ctk.CTk):
     def __init__(self):
@@ -90,8 +122,8 @@ class ClinicalTriageApp(ctk.CTk):
         if not files:
             return
 
-        # Display middle slice
-        self.viewer.display_slice(files[len(files)//2])
+        # Load into viewer
+        self.viewer.load_series(files)
         
         # Run Analysis
         try:
