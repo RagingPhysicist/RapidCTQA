@@ -1,0 +1,109 @@
+app:
+  name: RT CT Pre-Contour QA Portal
+  version: 1.0
+
+ui:
+  layout:
+    type: dashboard
+
+  pages:
+
+    - name: upload_status
+      route: "/status"
+      widgets:
+        - dicom_ingestion_queue
+        - validation_status_table
+        - error_summary_panel
+
+    - name: study_view
+      route: "/study/:series_uid"
+      widgets:
+        - dicom_series_viewer
+        - qa_results_panel
+        - gas_analysis_overlay
+        - geometry_report
+
+    - name: decision_page
+      route: "/decision/:series_uid"
+      widgets:
+        - accept_reject_banner
+        - conditional_flags_list
+        - rescan_recommendation_box
+
+backend:
+
+  dicom_listener:
+    host: "0.0.0.0"
+    port: 11112
+    aet: "RT_QA_SCP"
+
+  storage:
+    type: filesystem
+    path: "/data/rtct"
+
+  api:
+    base_url: "/api"
+
+    endpoints:
+
+      ingest_status:
+        path: "/api/status"
+        method: GET
+
+      study_list:
+        path: "/api/studies"
+        method: GET
+
+      study_detail:
+        path: "/api/studies/{series_uid}"
+        method: GET
+
+      run_validation:
+        path: "/api/validate/{series_uid}"
+        method: POST
+
+validation_engine:
+
+  config_file: "rtct_precontour_yaml_001.yaml"
+
+  execution:
+    trigger: "on_series_complete"
+    mode: "async"
+
+  outputs:
+    store_results: true
+    format: json
+
+decision_logic:
+
+  accept:
+    condition: "reject_flags == 0 AND conditional_flags == 0"
+
+  conditional:
+    condition: "reject_flags == 0 AND conditional_flags > 0"
+
+  reject:
+    condition: "reject_flags > 0"
+
+dicom_pipeline:
+
+  on_receive_series:
+    steps:
+      - validate_dicom_integrity
+      - assemble_series
+      - compute_metrics
+      - run_qc_rules
+      - store_results
+      - notify_ui
+
+integration:
+
+  pacs:
+    type: DICOM_CSTORE
+    incoming_aet: "RT_QA_SCP"
+
+  optional_export:
+    format: JSON
+    send_to:
+      - "RIS"
+      - "QA_DATABASE"
