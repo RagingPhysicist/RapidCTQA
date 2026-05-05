@@ -7,6 +7,7 @@ import glob
 import pydicom
 import subprocess
 import sys
+import shutil
 import pydicom
 from typing import List, Dict
 from .models import QAResult, StudySummary, IngestionStatus
@@ -24,8 +25,10 @@ app.add_middleware(
 )
 
 STORAGE_DIR = "./data/rtct"
+EXPORT_DIR = "./TPS_EXPORT"
 FRONTEND_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "frontend")
 os.makedirs(STORAGE_DIR, exist_ok=True)
+os.makedirs(EXPORT_DIR, exist_ok=True)
 
 engine = QAEngine("ctqa.yaml")
 results_cache: Dict[str, QAResult] = {}
@@ -45,6 +48,13 @@ def on_series_received(series_uid: str):
         result = engine.analyze_series(dicom_files)
         results_cache[series_uid] = result
         print(f"Analysis complete for {series_uid}: {result.status}")
+        
+        # Auto-export if ACCEPTED
+        if result.status == "ACCEPT":
+            dest = os.path.join(EXPORT_DIR, series_uid)
+            if not os.path.exists(dest):
+                print(f"Auto-exporting {series_uid} to TPS...")
+                shutil.copytree(study_path, dest)
 
 listener = DicomListener(STORAGE_DIR, on_series_received)
 
