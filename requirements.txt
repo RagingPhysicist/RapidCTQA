@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+pynetdicom
+pydicom
+numpy
+pyyaml
+python-multipart
+pydantic

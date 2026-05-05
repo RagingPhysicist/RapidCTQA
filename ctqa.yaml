@@ -1,0 +1,260 @@
+sop:
+  id: RT-CT-PRECONTOUR-QA
+  version: 1.2
+  description: >
+    Pre-contouring QA for radiotherapy CT datasets. Updated with
+    Biological-relative tolerances for clinical patient datasets.
+
+dicom:
+
+  tags:
+
+    SeriesInstanceUID:
+      tag: "0020,000E"
+      type: string
+
+    SOPInstanceUID:
+      tag: "0008,0018"
+      type: string
+
+    Modality:
+      tag: "0008,0060"
+      expected: "CT"
+
+    ImagePositionPatient:
+      tag: "0020,0032"
+      type: float[3]
+
+    ImageOrientationPatient:
+      tag: "0020,0037"
+      type: float[6]
+
+    PixelSpacing:
+      tag: "0028,0030"
+      type: float[2]
+
+    SliceThickness:
+      tag: "0018,0050"
+      type: float
+
+    SpacingBetweenSlices:
+      tag: "0018,0088"
+      optional: true
+
+    GantryDetectorTilt:
+      tag: "0018,1120"
+      default: 0.0
+
+    Rows:
+      tag: "0028,0010"
+
+    Columns:
+      tag: "0028,0011"
+
+    RescaleSlope:
+      tag: "0028,1053"
+
+    RescaleIntercept:
+      tag: "0028,1052"
+
+    PatientPosition:
+      tag: "0018,5100"
+
+    KVP:
+      tag: "0018,0060"
+      optional: true
+
+    ConvolutionKernel:
+      tag: "0018,1210"
+      optional: true
+
+    ContrastBolusAgent:
+      tag: "0018,0010"
+      optional: true
+
+derived_metrics:
+
+  slice_z_positions:
+    source: ImagePositionPatient
+    method: "extract z component and sort"
+
+  slice_spacing_array:
+    method: "diff(slice_z_positions)"
+
+  slice_spacing_variation_mm:
+    method: "max(slice_spacing_array) - min(slice_spacing_array)"
+
+  monotonic_z:
+    method: "all(diff > 0) OR all(diff < 0)"
+
+  duplicate_slices:
+    method: "len(unique(slice_z_positions)) != total_slices"
+
+  voxel_volume_cc:
+    method: "(PixelSpacing[0] * PixelSpacing[1] * SliceThickness) / 1000"
+
+  hu_conversion:
+    method: "HU = pixel * RescaleSlope + RescaleIntercept"
+
+  air_hu_estimate:
+    method: "percentile(volume, 1)"
+
+  water_hu_estimate:
+    method: "median(volume)"
+
+  noise_std_hu:
+    method: "std(center ROI)"
+
+  gas_mask:
+    method: "volume < -500 HU"
+
+  gas_volume_cc:
+    method: "sum(gas_mask) * voxel_volume_cc"
+
+  body_edge_contact:
+    method: "any(body voxels touch image border)"
+
+thresholds:
+
+  geometry:
+    max_slice_spacing_variation_mm: 1.0
+    max_gantry_tilt_deg: 1.0
+
+  slice_thickness:
+    preferred_max_mm: 3.0
+    absolute_max_mm: 5.0
+
+  hu:
+    air_range: [-1100, -900]
+    water_range: [-35, 35]
+
+  noise:
+    preferred_max_hu: 35
+    absolute_max_hu: 50
+
+  gas:
+    general:
+      conditional_cc: 100
+      reject_cc: 300
+
+    prostate:
+      rectal_diameter_cm:
+        accept: 4.0
+        conditional: 5.0
+      gas_volume_cc:
+        accept: 50
+        conditional: 100
+
+rules:
+
+  dicom_integrity:
+
+    - name: single_series
+      check: "unique(SeriesInstanceUID) == 1"
+      reject_if_false: true
+
+    - name: modality_check
+      check: "Modality == 'CT'"
+      reject_if_false: true
+
+    - name: duplicate_slices
+      check: "duplicate_slices == false"
+      reject_if_false: true
+
+  geometry:
+
+    - name: monotonic_z
+      check: "monotonic_z == true"
+      reject_if_false: true
+
+    - name: slice_spacing
+      check: "slice_spacing_variation_mm <= 1.0"
+      reject_if_false: true
+
+    - name: gantry_tilt
+      check: "abs(GantryDetectorTilt) <= 1.0"
+      conditional_if_false: true
+
+  slice_resolution:
+
+    - name: preferred_thickness
+      check: "SliceThickness <= 3.0"
+      accept_if_true: true
+      conditional_if_false: true
+
+    - name: absolute_thickness
+      check: "SliceThickness <= 5.0"
+      reject_if_false: true
+
+  hu_integrity:
+
+    - name: air_hu
+      check: "air_hu_estimate in [-1100, -900]"
+      reject_if_false: true
+
+    - name: water_hu
+      check: "water_hu_estimate in [-35, 35]"
+      reject_if_false: true
+
+    - name: rescale_valid
+      check: "RescaleSlope != 0"
+      reject_if_false: true
+
+  image_quality:
+
+    - name: noise_preferred
+      check: "noise_std_hu <= 35"
+      accept_if_true: true
+      conditional_if_false: true
+
+    - name: noise_absolute
+      check: "noise_std_hu <= 50"
+      reject_if_false: true
+
+  field_of_view:
+
+    - name: body_not_truncated
+      check: "body_edge_contact == true"
+      reject_if_false: true
+
+  bowel_gas:
+
+    - name: excessive_gas
+      check: "gas_volume_cc <= 300"
+      reject_if_false: true
+
+    - name: moderate_gas
+      check: "gas_volume_cc <= 100"
+      conditional_if_false: true
+
+decision:
+
+  accept:
+    - no_reject_flags
+    - no_conditional_flags
+
+  conditional:
+    - no_reject_flags
+    - any_conditional_flags
+
+  reject:
+    - any_reject_flag
+
+outputs:
+
+  status: [ACCEPT, CONDITIONAL, REJECT]
+
+  report_fields:
+    - geometry
+    - hu
+    - noise
+    - gas_volume_cc
+    - flags
+
+audit:
+
+  required:
+    - reviewer_id
+    - date
+    - site
+    - decision

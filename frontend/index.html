@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>RapidCTQA Portal | RT CT Pre-Contour QA</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet">
+</head>
+<body>
+  <div class="container">
+    <header>
+      <div class="logo">RapidCTQA</div>
+      <div id="connection-status" class="badge badge-pending">Connecting...</div>
+    </header>
+
+    <main>
+      <div class="status-grid">
+        <div class="card">
+          <div class="card-title">Active Transfers</div>
+          <div id="active-transfers" class="card-value">0</div>
+        </div>
+        <div class="card">
+          <div class="card-title">Queue Size</div>
+          <div id="queue-size" class="card-value">0</div>
+        </div>
+        <div class="card">
+          <div class="card-title">Processed Today</div>
+          <div id="processed-today" class="card-value">0</div>
+        </div>
+      </div>
+
+      <section class="study-list-section">
+        <h2 style="margin-bottom: 1.5rem;">Recent CT Series</h2>
+        <div class="study-list">
+          <table>
+            <thead>
+              <tr>
+                <th>Patient Name</th>
+                <th>Protocol</th>
+                <th>Series UID</th>
+                <th>Instances</th>
+                <th>QA Status</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="study-table-body">
+              <!-- Dynamically populated -->
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <!-- Detail Modal -->
+  <div id="modal" class="modal-overlay">
+    <div class="modal-content">
+      <button class="close-btn" onclick="closeModal()">&times;</button>
+      <h2 id="modal-title">Study Details</h2>
+      <div id="modal-body">
+        <!-- Dynamically populated -->
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

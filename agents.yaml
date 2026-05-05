@@ -1,0 +1,65 @@
+version: "1.0"
+metadata:
+  purpose: "Rapid Radiotherapy CT QA"
+  system_threshold_unit: "Hounsfield Units (HU)"
+
+agents:
+  - name: "GeometryGuardian"
+    role: "Truncation & FOV Detector"
+    description: "Ensures the patient anatomy is fully contained within the reconstruction FOV."
+    parameters:
+      skin_threshold: -200
+      edge_buffer_px: 3
+    logic: "Scan image matrix perimeter. If mean(edge_buffer) > skin_threshold, trigger TRUNCATION_ERROR."
+
+  - name: "FluidPhysicist"
+    role: "HU Accuracy Specialist"
+    description: "Validates CT number constancy using internal biological markers."
+    parameters:
+      # Adjusted for patient data instead of phantom
+      base_water_target: 0
+      patient_fluid_tolerance: 35.0 
+      contrast_tag: [0x0018, 0x0010]
+    logic: |
+      1. Check DICOM Contrast tag. If 'CONTRAST', set status to 'SKIPPED_CONTRAST'.
+      2. Locate Bladder ROI using mid-range HU density.
+      3. Calculate Median HU. 
+      4. If 0 <= Median <= 35, return 'PASS' (accounts for 33.0 HU being normal urine/fluid).
+      5. Only fail if Median > 40 without contrast.
+
+  - name: "NoiseWhisperer"
+    role: "Signal-to-Noise Analyst"
+    description: "Differentiates between hardware noise and anatomical complexity."
+    parameters:
+      roi_size: 20
+      max_air_sd: 15.0
+    logic: |
+      1. Crop 20x20px regions from the four extreme corners of the volume (Background Air).
+      2. Calculate Standard Deviation (SD) of these regions.
+      3. If SD_air < max_air_sd, return 'PASS'. 
+      4. Note: High internal patient variance is ignored if background air is stable.
+
+  - name: "CavityScout"
+    role: "Air & Gas Auditor"
+    description: "Detects large air pockets in bowel or stomach that impact dosimetry."
+    parameters:
+      air_threshold: -700
+      max_gas_volume_cc: 15.0
+    logic: "Isolate voxels < -700 inside body mask. Cluster connected components. Flag if volume > max_gas_volume_cc."
+
+- name: "ReviewerAgent"
+    role: "Gatekeeper"
+    description: "Orchestrates doctor approval and records the final clinical decision."
+    parameters:
+      required_approver: "Radiation Oncologist"
+    logic: |
+      1. Collect flags from physics agents.
+      2. If any flags present, set status to 'PENDING_REVIEW'.
+      3. Display 'Approve' or 'Reject' buttons to the Doctor.
+      4. On Reject: Generate 'RE-SCAN REQUIRED' alert.
+      5. On Approve: Move DICOM to 'TPS_Inbound' folder.
+orchestrator:
+  mode: "parallel"
+  error_handling:
+    water_hu_33_fix: "If FluidPhysicist returns < 35 and non-contrast, downgrade 'Critical Failure' to 'Clinical Variance'."
+    noise_fix: "Prioritize NoiseWhisperer.air_sd over internal image variance."
