@@ -1,0 +1,24 @@
+{
+  "ct_window_level_presets": {
+    "head": {
+      "window_width": 80,
+      "window_level": 40
+    },
+    "head_neck": {
+      "window_width": 350,
+      "window_level": 50
+    },
+    "thorax": {
+      "window_width": 350,
+      "window_level": 40
+    },
+    "pelvis": {
+      "window_width": 400,
+      "window_level": 40
+    },
+    "extremity": {
+      "window_width": 350,
+      "window_level": 50
+    }
+  }
+}

@@ -5,6 +5,9 @@ from fastapi.middleware.cors import CORSMiddleware
 import os
 import glob
 import pydicom
+import subprocess
+import sys
+import pydicom
 from typing import List, Dict
 from .models import QAResult, StudySummary, IngestionStatus
 from .engine import QAEngine
@@ -113,6 +116,15 @@ async def get_study_detail(series_uid: str):
 async def run_validation(series_uid: str, background_tasks: BackgroundTasks):
     background_tasks.add_task(on_series_received, series_uid)
     return {"message": "Validation triggered"}
+
+@app.post("/api/launch_cockpit/{series_uid}")
+async def launch_cockpit(series_uid: str):
+    try:
+        # Launch cockpit.py with the current python executable
+        subprocess.Popen([sys.executable, "cockpit.py", series_uid])
+        return {"message": f"Cockpit launched for {series_uid}"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to launch cockpit: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn

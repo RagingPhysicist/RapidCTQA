@@ -2,7 +2,7 @@ import customtkinter as ctk
 import pydicom
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-import os, shutil, glob
+import os, shutil, glob, sys, json
 from backend.engine import QAEngine
 
 # Settings
@@ -15,6 +15,8 @@ class DICOMViewer(ctk.CTkFrame):
         super().__init__(master, **kwargs)
         self.files = []
         self.current_index = 0
+        self.window_width = 1000 # Default
+        self.window_level = 0    # Default
         
         self.fig, self.ax = plt.subplots(figsize=(5, 5), facecolor='#1a1a1a')
         self.canvas = FigureCanvasTkAgg(self.fig, master=self)
@@ -34,6 +36,11 @@ class DICOMViewer(ctk.CTkFrame):
             self.slider.configure(from_=0, to=len(self.files) - 1)
             self.display_slice(len(self.files) // 2)
 
+    def set_window_level(self, width, level):
+        self.window_width = width
+        self.window_level = level
+        self.display_slice(self.current_index)
+
     def display_slice(self, index):
         if not self.files: return
         self.current_index = int(index)
@@ -41,8 +48,19 @@ class DICOMViewer(ctk.CTkFrame):
         
         try:
             ds = pydicom.dcmread(self.files[self.current_index])
+            img = ds.pixel_array
+            
+            # Apply rescale
+            rescale_slope = getattr(ds, 'RescaleSlope', 1.0)
+            rescale_intercept = getattr(ds, 'RescaleIntercept', 0.0)
+            img = img * rescale_slope + rescale_intercept
+
+            # Calculate vmin/vmax
+            vmin = self.window_level - (self.window_width / 2)
+            vmax = self.window_level + (self.window_width / 2)
+
             self.ax.clear()
-            self.ax.imshow(ds.pixel_array, cmap='gray')
+            self.ax.imshow(img, cmap='gray', vmin=vmin, vmax=vmax)
             self.ax.set_title(f"Slice: {self.current_index + 1} / {len(self.files)}", color="white")
             self.ax.axis('off')
             self.canvas.draw()
@@ -69,6 +87,14 @@ class ClinicalTriageApp(ctk.CTk):
         self.engine = QAEngine("ctqa.yaml")
         self.current_series_path = None
         self.current_series_uid = None
+        
+        # Load WL Presets
+        try:
+            with open("WL.json", "r") as f:
+                self.wl_presets = json.load(f)["ct_window_level_presets"]
+        except Exception as e:
+            print(f"Error loading WL.json: {e}")
+            self.wl_presets = {}
 
         # Left Panel: Status & Logs
         self.sidebar = ctk.CTkFrame(self, width=350)
@@ -83,6 +109,13 @@ class ClinicalTriageApp(ctk.CTk):
         ctk.CTkLabel(self.sidebar, text="AGENT FINDINGS", font=("Roboto", 12, "bold")).pack(pady=(20, 0))
         self.flag_box = ctk.CTkTextbox(self.sidebar, height=400, width=300, font=("Consolas", 12))
         self.flag_box.pack(pady=10)
+
+        # Window/Level Presets
+        ctk.CTkLabel(self.sidebar, text="WINDOW / LEVEL PRESET", font=("Roboto", 12, "bold")).pack(pady=(20, 0))
+        preset_names = ["Auto (Default)"] + list(self.wl_presets.keys())
+        self.wl_menu = ctk.CTkOptionMenu(self.sidebar, values=preset_names, command=self._on_wl_change)
+        self.wl_menu.pack(pady=10)
+        self.wl_menu.set("Auto (Default)")
 
         # Right Panel: Viewer & Controls
         self.main_view = ctk.CTkFrame(self)
@@ -100,8 +133,23 @@ class ClinicalTriageApp(ctk.CTk):
         self.reject_btn = ctk.CTkButton(self.btn_frame, text="REJECT / RE-SCAN", fg_color="#dc3545", hover_color="#c82333", command=self.reject, height=50, font=("Roboto", 16, "bold"))
         self.reject_btn.pack(side="left", padx=20, expand=True)
 
-        # Polling for new scans
-        self.check_for_scans()
+        # Handle command-line arguments or start polling
+        if len(sys.argv) > 1:
+            series_uid = sys.argv[1]
+            series_path = os.path.join(STORAGE_DIR, series_uid)
+            if os.path.exists(series_path):
+                self.load_series(series_path)
+            else:
+                self.flag_box.insert("end", f"Error: Series {series_uid} not found.\n")
+        else:
+            self.check_for_scans()
+
+    def _on_wl_change(self, preset_name):
+        if preset_name in self.wl_presets:
+            p = self.wl_presets[preset_name]
+            self.viewer.set_window_level(p["window_width"], p["window_level"])
+        else:
+            self.viewer.set_window_level(1000, 0) # Default for CT
 
     def check_for_scans(self):
         if not self.current_series_path:
