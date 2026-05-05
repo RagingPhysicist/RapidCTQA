@@ -31,7 +31,12 @@ async function fetchStudies() {
         <td style="font-family: monospace; font-size: 0.75rem;">${study.series_uid.substring(0, 16)}...</td>
         <td>${study.instance_count}</td>
         <td><span class="badge badge-${study.status.toLowerCase()}">${study.status}</span></td>
-        <td><button class="view-btn" onclick="viewStudy('${study.series_uid}')">View Report</button></td>
+        <td>
+          <div class="actions-cell">
+            <button class="view-btn" onclick="viewStudy('${study.series_uid}')">View Report</button>
+            <button class="view-btn" style="background: var(--secondary);" onclick="launchCockpit('${study.series_uid}')">Cockpit</button>
+          </div>
+        </td>
       `;
       tbody.appendChild(tr);
     });
@@ -106,6 +111,19 @@ async function rerunQA(seriesUid) {
     fetchStudies();
   } catch (error) {
     console.error('Failed to re-run QA:', error);
+  }
+}
+
+async function launchCockpit(seriesUid) {
+  try {
+    const response = await fetch(`${API_BASE}/launch_cockpit/${seriesUid}`, { method: 'POST' });
+    const data = await response.json();
+    if (!response.ok) {
+        alert(data.detail || 'Failed to launch cockpit');
+    }
+  } catch (error) {
+    console.error('Failed to launch cockpit:', error);
+    alert('Failed to launch cockpit. Is the backend running?');
   }
 }
 

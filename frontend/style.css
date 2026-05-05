@@ -132,11 +132,19 @@ td {
   border-radius: 0.5rem;
   cursor: pointer;
   transition: all 0.2s;
+  white-space: nowrap;
 }
 
 .view-btn:hover {
   background: var(--primary);
   border-color: var(--primary);
+}
+
+.actions-cell {
+  display: flex;
+  gap: 0.5rem;
+  white-space: nowrap;
+  align-items: center;
 }
 
 /* Modal/Overlay Styles */
