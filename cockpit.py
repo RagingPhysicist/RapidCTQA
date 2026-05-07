@@ -232,6 +232,7 @@ class ClinicalTriageApp(ctk.CTk):
             self.status_lbl.configure(text="APPROVED - EXPORTED", text_color="#28a745")
             self.current_series_path = None
             self.flag_box.delete("0.0", "end")
+            self.after(1000, self.on_closing) # Brief delay to show success
 
     def reject(self):
         if self.current_series_path:
@@ -241,6 +242,7 @@ class ClinicalTriageApp(ctk.CTk):
                 f.write(f"{self.current_series_uid} rejected\n")
             self.current_series_path = None
             self.flag_box.delete("0.0", "end")
+            self.after(1000, self.on_closing) # Brief delay to show rejection status
 
 if __name__ == "__main__":
     app = ClinicalTriageApp()
