@@ -13,6 +13,7 @@ from typing import List, Dict
 from .models import QAResult, StudySummary, IngestionStatus
 from .engine import QAEngine
 from .listener import DicomListener
+from .reporter import generate_pdf_report
 
 app = FastAPI(title="RapidCTQA API")
 
@@ -26,9 +27,11 @@ app.add_middleware(
 
 STORAGE_DIR = "./data/rtct"
 EXPORT_DIR = "./TPS_EXPORT"
+REPORTS_DIR = "./reports"
 FRONTEND_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "frontend")
 os.makedirs(STORAGE_DIR, exist_ok=True)
 os.makedirs(EXPORT_DIR, exist_ok=True)
+os.makedirs(REPORTS_DIR, exist_ok=True)
 
 engine = QAEngine("ctqa.yaml")
 results_cache: Dict[str, QAResult] = {}
@@ -135,6 +138,30 @@ async def launch_cockpit(series_uid: str):
         return {"message": f"Cockpit launched for {series_uid}"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to launch cockpit: {str(e)}")
+
+@app.get("/api/reports/{series_uid}/pdf")
+async def get_pdf_report(series_uid: str):
+    if series_uid not in results_cache:
+        # Try to run validation if files exist but result not cached
+        study_path = os.path.join(STORAGE_DIR, series_uid)
+        dicom_files = glob.glob(os.path.join(study_path, "*.dcm"))
+        if dicom_files:
+            on_series_received(series_uid)
+        else:
+            raise HTTPException(status_code=404, detail="Study not found")
+
+    result = results_cache[series_uid]
+    pdf_path = os.path.join(REPORTS_DIR, f"QA_Report_{series_uid}.pdf")
+    
+    try:
+        generate_pdf_report(result, pdf_path)
+        return FileResponse(
+            pdf_path, 
+            media_type="application/pdf", 
+            filename=f"RapidCTQA_Report_{result.patient_name}_{series_uid[:8]}.pdf"
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"PDF Generation failed: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn

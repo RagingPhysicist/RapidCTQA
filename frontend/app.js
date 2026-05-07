@@ -91,7 +91,8 @@ async function viewStudy(seriesUid) {
           ${flagsHtml || '<p style="color: var(--text-muted);">No issues detected.</p>'}
         </div>
       </div>
-      <div style="margin-top: 2rem; padding-top: 1rem; border-top: 1px solid var(--border);">
+      <div style="margin-top: 2rem; padding-top: 1rem; border-top: 1px solid var(--border); display: flex; gap: 1rem;">
+        <a href="${API_BASE}/reports/${seriesUid}/pdf" target="_blank" class="view-btn" style="background: var(--success); text-decoration: none;">Download PDF</a>
         <button class="view-btn" style="background: var(--secondary);" onclick="rerunQA('${seriesUid}')">Re-run Analysis</button>
       </div>
     `;
