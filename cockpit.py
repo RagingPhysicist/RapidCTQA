@@ -112,11 +112,24 @@ class ClinicalTriageApp(ctk.CTk):
         self.flag_box.pack(pady=10)
 
         # Window/Level Presets
-        ctk.CTkLabel(self.sidebar, text="WINDOW / LEVEL PRESET", font=("Roboto", 12, "bold")).pack(pady=(20, 0))
-        preset_names = ["Auto (Default)"] + list(self.wl_presets.keys())
+        ctk.CTkLabel(self.sidebar, text="WINDOW / LEVEL", font=("Roboto", 12, "bold")).pack(pady=(20, 0))
+        preset_names = ["Manual"] + list(self.wl_presets.keys())
         self.wl_menu = ctk.CTkOptionMenu(self.sidebar, values=preset_names, command=self._on_wl_change)
         self.wl_menu.pack(pady=10)
-        self.wl_menu.set("Auto (Default)")
+        self.wl_menu.set("Manual")
+
+        # Manual Sliders
+        self.ww_lbl = ctk.CTkLabel(self.sidebar, text="Width: 1000", font=("Roboto", 11))
+        self.ww_lbl.pack()
+        self.ww_slider = ctk.CTkSlider(self.sidebar, from_=1, to=3000, command=self._on_manual_wl_change)
+        self.ww_slider.set(1000)
+        self.ww_slider.pack(pady=(0, 10))
+
+        self.wl_lbl = ctk.CTkLabel(self.sidebar, text="Level: 0", font=("Roboto", 11))
+        self.wl_lbl.pack()
+        self.wl_slider = ctk.CTkSlider(self.sidebar, from_=-1000, to=1000, command=self._on_manual_wl_change)
+        self.wl_slider.set(0)
+        self.wl_slider.pack(pady=(0, 10))
 
         # Right Panel: Viewer & Controls
         self.main_view = ctk.CTkFrame(self)
@@ -155,9 +168,20 @@ class ClinicalTriageApp(ctk.CTk):
     def _on_wl_change(self, preset_name):
         if preset_name in self.wl_presets:
             p = self.wl_presets[preset_name]
-            self.viewer.set_window_level(p["window_width"], p["window_level"])
-        else:
-            self.viewer.set_window_level(1000, 0) # Default for CT
+            ww, wl = p["window_width"], p["window_level"]
+            self.ww_slider.set(ww)
+            self.wl_slider.set(wl)
+            self.ww_lbl.configure(text=f"Width: {int(ww)}")
+            self.wl_lbl.configure(text=f"Level: {int(wl)}")
+            self.viewer.set_window_level(ww, wl)
+
+    def _on_manual_wl_change(self, _):
+        self.wl_menu.set("Manual")
+        ww = self.ww_slider.get()
+        wl = self.wl_slider.get()
+        self.ww_lbl.configure(text=f"Width: {int(ww)}")
+        self.wl_lbl.configure(text=f"Level: {int(wl)}")
+        self.viewer.set_window_level(ww, wl)
 
     def check_for_scans(self):
         if not self.current_series_path:
