@@ -1,8 +1,9 @@
 fastapi
-uvicorn
-pynetdicom
-pydicom
 numpy
-pyyaml
-python-multipart
 pydantic
+pydicom
+pynetdicom
+python-multipart
+pyyaml
+scipy==1.17.1
+uvicorn
