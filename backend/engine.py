@@ -1,5 +1,6 @@
 import pydicom
 import numpy as np
+import scipy.ndimage as ndimage
 import yaml
 import os
 from typing import List, Dict, Any
@@ -121,6 +122,55 @@ class QAEngine:
                 if np.any(metal_voxels[i]):
                     metal_slices.append(i + 1)
 
+        # --- Agent: AlignmentAuditor ---
+        align_cfg = self.config.get("thresholds", {}).get("alignment", {})
+        bone_thresh = align_cfg.get("bone_threshold_hu", 250)
+        tilt_limit = align_cfg.get("max_allowable_tilt_deg", 2.0)
+
+        tilt_angles = []
+        tilted_slices = []
+
+        for i in range(hu_volume.shape[0]):
+            slice_data = hu_volume[i]
+            bone_mask = slice_data > bone_thresh
+
+            if not np.any(bone_mask):
+                continue
+
+            # Split into left and right halves to find bilateral landmarks
+            mid_x = slice_data.shape[1] // 2
+            left_half = bone_mask[:, :mid_x]
+            right_half = bone_mask[:, mid_x:]
+
+            if np.any(left_half) and np.any(right_half):
+                # Find largest connected component in each half as landmarks
+                l_labels, l_num = ndimage.label(left_half)
+                r_labels, r_num = ndimage.label(right_half)
+
+                if l_num > 0 and r_num > 0:
+                    l_sizes = ndimage.sum(left_half, l_labels, range(1, l_num + 1))
+                    r_sizes = ndimage.sum(right_half, r_labels, range(1, r_num + 1))
+
+                    l_idx = np.argmax(l_sizes) + 1
+                    r_idx = np.argmax(r_sizes) + 1
+
+                    com_l = ndimage.center_of_mass(l_labels == l_idx)
+                    com_r = ndimage.center_of_mass(r_labels == r_idx)
+
+                    # Adjust right COM X-coordinate back to full image space
+                    y1, x1 = com_l
+                    y2, x2 = com_r
+                    x2 += mid_x
+
+                    if abs(x2 - x1) > 10: # Ensure landmarks are reasonably separated
+                        angle = np.degrees(np.arctan2(y2 - y1, x2 - x1))
+                        tilt_angles.append(angle)
+                        if abs(angle) > tilt_limit:
+                            tilted_slices.append(i + 1)
+
+        max_tilt = float(np.max(np.abs(tilt_angles))) if tilt_angles else 0.0
+        tilt_warning = max_tilt > tilt_limit
+
         # --- Pediatric Protocol Check ---
         # Both StudyDescription and ProtocolName contain "(Child)" or "(Adult)".
         # Mismatch = patient age marker doesn't match protocol marker, OR age itself contradicts marker.
@@ -194,6 +244,8 @@ class QAEngine:
             "metal_volume_cc": metal_volume_cc,
             "metal_slices": metal_slices,
             "truncated_slices": truncated_slices,
+            "max_tilt_deg": max_tilt,
+            "tilted_slices": tilted_slices,
             "pediatric_mismatch": pediatric_mismatch,
             "pediatric_mismatch_message": pediatric_mismatch_message,
             "rescale_slope": rescale_slope,
@@ -283,6 +335,15 @@ class QAEngine:
         if metrics["metal_detected"]:
             slice_info = self._format_slices(metrics.get("metal_slices", []))
             flags.append(QAFlag(name="ImplantAuditor", status="CONDITIONAL", message=f"METAL_IMPLANT: High-density metal detected ({metrics['metal_volume_cc']:.2f} cc){slice_info}. Verify implant/cardiac device safety."))
+
+        # --- AlignmentAuditor Responsibilities ---
+        if metrics["max_tilt_deg"] > 0:
+            align_limit = self.config.get("thresholds", {}).get("alignment", {}).get("max_allowable_tilt_deg", 2.0)
+            status = "ACCEPT"
+            if metrics["max_tilt_deg"] > align_limit:
+                status = "CONDITIONAL"
+                slice_info = self._format_slices(metrics.get("tilted_slices", []))
+                flags.append(QAFlag(name="AlignmentAuditor", status=status, message=f"TILT_WARNING: Patient rotation detected ({metrics['max_tilt_deg']:.1f}°){slice_info}"))
 
         # --- Integrity (Shared/Lead Oversight) ---
         if metrics["pediatric_mismatch"]:
