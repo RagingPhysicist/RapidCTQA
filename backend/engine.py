@@ -106,10 +106,15 @@ class QAEngine:
 
         # --- Agent: ImplantAuditor ---
         # Logic: Detect high-density metal implants or devices (HU > 2000) inside the body.
-        metal_threshold = 2000
+        # Use a more restrictive body mask (exclude skin markers) by simple perimeter erosion if needed,
+        # but here we'll use the threshold from config and increase it to ignore small marker balls.
+        implant_cfg = self.config.get("thresholds", {}).get("implants", {})
+        metal_threshold = implant_cfg.get("metal_threshold_hu", 2000)
+        metal_vol_limit = implant_cfg.get("max_volume_cc", 0.05)
+
         metal_voxels = (hu_volume > metal_threshold) & body_mask
         metal_volume_cc = float(np.sum(metal_voxels) * voxel_vol)
-        metal_detected = metal_volume_cc > 0.05
+        metal_detected = metal_volume_cc > metal_vol_limit
         metal_slices = []
         if metal_detected:
             for i in range(hu_volume.shape[0]):
