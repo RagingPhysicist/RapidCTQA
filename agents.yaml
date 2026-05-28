@@ -10,7 +10,7 @@ agents:
     parameters:
       skin_threshold: -200
       edge_buffer_px: 3
-    logic: "Scan image matrix perimeter. If mean(edge_buffer) > skin_threshold, trigger TRUNCATION_ERROR."
+    logic: "Scan image matrix perimeter. If count(edge_buffer > skin_threshold) >= 5 on any slice, trigger TRUNCATION_ERROR."
 
   - name: "FluidPhysicist"
     role: "HU Accuracy Specialist"
@@ -46,6 +46,14 @@ agents:
       air_threshold: -700
       max_gas_volume_cc: 15.0
     logic: "Isolate voxels < -700 inside body mask. Cluster connected components. Flag if volume > max_gas_volume_cc."
+
+  - name: "ImplantAuditor"
+    role: "High-Density Implant Detector"
+    description: "Detects high-density metal implants, cardiac devices, or dental work inside the body."
+    parameters:
+      metal_threshold_hu: 2000
+      min_metal_volume_cc: 0.05
+    logic: "Isolate voxels > metal_threshold_hu inside body mask. Trigger a conditional warning if total volume exceeds min_metal_volume_cc."
 
 - name: "ReviewerAgent"
     role: "Gatekeeper"

@@ -2,11 +2,44 @@ import customtkinter as ctk
 import pydicom
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-import os, shutil, glob, sys, json
+import os, shutil, glob, sys, json, yaml
 from backend.engine import QAEngine
 
-# Settings
-STORAGE_DIR = "./data/rtct"
+# Load configuration
+def normalise_storage_path(path: str) -> str:
+    """
+    Normalise the storage path, falling back to mapped drive letter on Windows if needed.
+    """
+    if not path:
+        return "./data/rtct"
+    if os.name == 'nt':
+        norm = os.path.normpath(path)
+        unc_prefix = "\\\\imgserver\\DICOM"
+        if norm.startswith(unc_prefix):
+            try:
+                # If network path is accessible directly, use it
+                if os.path.exists(unc_prefix):
+                    return norm
+            except Exception:
+                pass
+            
+            # Try S: drive fallback if UNC path is not accessible but S: exists
+            s_fallback = norm.replace(unc_prefix, "S:")
+            try:
+                if os.path.exists("S:\\") or os.path.exists("S:"):
+                    return s_fallback
+            except Exception:
+                pass
+    return path
+
+try:
+    with open("webApp.yaml", "r") as f:
+        config_web = yaml.safe_load(f)
+    STORAGE_DIR = normalise_storage_path(config_web.get("backend", {}).get("storage", {}).get("path", "./data/rtct"))
+except Exception as e:
+    print(f"Error loading webApp.yaml: {e}")
+    STORAGE_DIR = "./data/rtct"
+
 EXPORT_DIR = "./TPS_EXPORT"
 os.makedirs(EXPORT_DIR, exist_ok=True)
 

@@ -10,6 +10,7 @@ class DicomListener:
         self.storage_dir = storage_dir
         self.callback = callback
         self.series_tracker: Dict[str, int] = {}
+        self.timers: Dict[str, threading.Timer] = {}
         self._lock = threading.Lock()
 
     def start(self, host: str = "0.0.0.0", port: int = 11112):
@@ -37,14 +38,28 @@ class DicomListener:
         
         with self._lock:
             self.series_tracker[series_uid] = self.series_tracker.get(series_uid, 0) + 1
+            # Reset/Cancel timer if it exists
+            if series_uid in self.timers:
+                self.timers[series_uid].cancel()
             
         return 0x0000
 
     def _handle_release(self, event):
-        # Simplification: trigger callback on association release if we have new data
+        # Debounce: wait 5 seconds before triggering callback
         with self._lock:
             for series_uid in list(self.series_tracker.keys()):
+                if series_uid in self.timers:
+                    self.timers[series_uid].cancel()
+                
+                timer = threading.Timer(5.0, self._trigger_callback, args=[series_uid])
+                self.timers[series_uid] = timer
+                timer.start()
+
+    def _trigger_callback(self, series_uid: str):
+        print(f"Series {series_uid} seems complete. Triggering analysis...")
+        with self._lock:
+            if series_uid in self.series_tracker:
                 self.callback(series_uid)
-                # In a real app, we'd wait for a "complete" signal or timeout
-                # but for this demo, association release works.
                 del self.series_tracker[series_uid]
+            if series_uid in self.timers:
+                del self.timers[series_uid]

@@ -114,6 +114,9 @@ derived_metrics:
   body_edge_contact:
     method: "any(body voxels touch image border)"
 
+  pediatric_mismatch:
+    method: "PatientAge < 18 and 'Child' not in StudyDescription"
+
 thresholds:
 
   geometry:
@@ -137,6 +140,10 @@ thresholds:
       conditional_cc: 100
       reject_cc: 300
 
+  implants:
+    metal_threshold_hu: 2000
+    max_volume_cc: 0.05
+
     prostate:
       rectal_diameter_cm:
         accept: 4.0
@@ -159,6 +166,10 @@ rules:
 
     - name: duplicate_slices
       check: "duplicate_slices == false"
+      reject_if_false: true
+
+    - name: pediatric_protocol_check
+      check: "pediatric_mismatch == false"
       reject_if_false: true
 
   geometry:
@@ -225,6 +236,12 @@ rules:
 
     - name: moderate_gas
       check: "gas_volume_cc <= 100"
+      conditional_if_false: true
+
+  implants:
+
+    - name: metal_implants
+      check: "metal_volume_cc <= 0.05"
       conditional_if_false: true
 
 decision:

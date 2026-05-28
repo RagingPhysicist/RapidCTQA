@@ -10,10 +10,24 @@ import sys
 import shutil
 import pydicom
 from typing import List, Dict
-from .models import QAResult, StudySummary, IngestionStatus
-from .engine import QAEngine
-from .listener import DicomListener
-from .reporter import generate_pdf_report
+try:
+    from .models import QAResult, StudySummary, IngestionStatus
+    from .engine import QAEngine
+    from .listener import DicomListener
+    from .reporter import generate_pdf_report
+except ImportError:
+    import sys
+    # Add root folder to sys.path when running main.py directly
+    sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from backend.models import QAResult, StudySummary, IngestionStatus
+    from backend.engine import QAEngine
+    from backend.listener import DicomListener
+    from backend.reporter import generate_pdf_report
+import yaml
+
+# Load webApp configuration
+with open("webApp.yaml", "r") as f:
+    config_web = yaml.safe_load(f)
 
 app = FastAPI(title="RapidCTQA API")
 
@@ -25,10 +39,37 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-STORAGE_DIR = "./data/rtct"
+def normalise_storage_path(path: str) -> str:
+    """
+    Normalise the storage path, falling back to mapped drive letter on Windows if needed.
+    """
+    if not path:
+        return "./data/rtct"
+    if os.name == 'nt':
+        norm = os.path.normpath(path)
+        unc_prefix = "\\\\imgserver\\DICOM"
+        if norm.startswith(unc_prefix):
+            try:
+                # If network path is accessible directly, use it
+                if os.path.exists(unc_prefix):
+                    return norm
+            except Exception:
+                pass
+            
+            # Try S: drive fallback if UNC path is not accessible but S: exists
+            s_fallback = norm.replace(unc_prefix, "S:")
+            try:
+                if os.path.exists("S:\\") or os.path.exists("S:"):
+                    return s_fallback
+            except Exception:
+                pass
+    return path
+
+STORAGE_DIR = normalise_storage_path(config_web.get("backend", {}).get("storage", {}).get("path", "./data/rtct"))
 EXPORT_DIR = "./TPS_EXPORT"
 REPORTS_DIR = "./reports"
 FRONTEND_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "frontend")
+print(f"Using storage directory: {STORAGE_DIR}")
 os.makedirs(STORAGE_DIR, exist_ok=True)
 os.makedirs(EXPORT_DIR, exist_ok=True)
 os.makedirs(REPORTS_DIR, exist_ok=True)
@@ -63,7 +104,10 @@ listener = DicomListener(STORAGE_DIR, on_series_received)
 
 @app.on_event("startup")
 async def startup_event():
-    listener.start()
+    dl_config = config_web.get("backend", {}).get("dicom_listener", {})
+    host = dl_config.get("host", "0.0.0.0")
+    port = dl_config.get("port", 11112)
+    listener.start(host=host, port=port)
 
 @app.get("/api/status", response_model=IngestionStatus)
 async def get_status():
