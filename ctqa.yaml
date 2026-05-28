@@ -142,7 +142,7 @@ thresholds:
 
   implants:
     metal_threshold_hu: 2000
-    max_volume_cc: 0.05
+    max_volume_cc: 0.2
 
     prostate:
       rectal_diameter_cm:
