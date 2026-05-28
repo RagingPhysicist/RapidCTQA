@@ -107,25 +107,54 @@ class QAEngine:
 
         # --- Pediatric Protocol Check ---
         # Both StudyDescription and ProtocolName contain "(Child)" or "(Adult)".
-        # Mismatch = patient age marker doesn't match protocol marker.
+        # Mismatch = patient age marker doesn't match protocol marker, OR age itself contradicts marker.
         study_desc = str(getattr(datasets[0], 'StudyDescription', ''))
         protocol = str(getattr(datasets[0], 'ProtocolName', ''))
+        patient_age_str = str(getattr(datasets[0], 'PatientAge', ''))
+
         pediatric_mismatch = False
         pediatric_mismatch_message = ""
+
+        # Parse PatientAge (DICOM VR: AS - nnnY, nnnM, nnnW, nnnD)
+        age_years = None
+        if patient_age_str and len(patient_age_str) == 4:
+            try:
+                value = int(patient_age_str[:3])
+                unit = patient_age_str[3].upper()
+                if unit == 'Y':
+                    age_years = value
+                elif unit == 'M':
+                    age_years = value / 12.0
+                elif unit == 'W':
+                    age_years = value / 52.17
+                elif unit == 'D':
+                    age_years = value / 365.25
+            except ValueError:
+                pass
+
+        patient_is_child = age_years is not None and age_years < 18
+        patient_is_adult = age_years is not None and age_years >= 18
 
         study_is_child = "(Child)" in study_desc
         study_is_adult = "(Adult)" in study_desc
         protocol_is_child = "(Child)" in protocol
         protocol_is_adult = "(Adult)" in protocol
 
-        # Only evaluate when both fields carry a recognised marker
-        if (study_is_child or study_is_adult) and (protocol_is_child or protocol_is_adult):
-            if study_is_child and protocol_is_adult:
+        # Rule 1: Patient age vs Protocol/Study markers
+        if patient_is_child:
+            if study_is_adult or protocol_is_adult:
                 pediatric_mismatch = True
-                pediatric_mismatch_message = f"PEDIATRIC_MISMATCH: Child patient scanned with Adult protocol '{protocol}'."
-            elif study_is_adult and protocol_is_child:
+                pediatric_mismatch_message = f"PEDIATRIC_MISMATCH: Child patient ({patient_age_str}) scanned with Adult protocol/study."
+        elif patient_is_adult:
+            if study_is_child or protocol_is_child:
                 pediatric_mismatch = True
-                pediatric_mismatch_message = f"PEDIATRIC_MISMATCH: Adult patient scanned with Child protocol '{protocol}'."
+                pediatric_mismatch_message = f"PEDIATRIC_MISMATCH: Adult patient ({patient_age_str}) scanned with Child protocol/study."
+
+        # Rule 2: Study marker vs Protocol marker mismatch (legacy check)
+        if not pediatric_mismatch:
+            if (study_is_child and protocol_is_adult) or (study_is_adult and protocol_is_child):
+                pediatric_mismatch = True
+                pediatric_mismatch_message = f"PEDIATRIC_MISMATCH: Protocol '{protocol}' does not match Study Description '{study_desc}'."
 
         metrics = {
             "series_uid": datasets[0].SeriesInstanceUID,
