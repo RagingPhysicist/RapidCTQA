@@ -57,12 +57,13 @@ class QAEngine:
         
         # Check if any slice has non-air pixels touching the perimeter
         truncation_error = False
-        for slice_data in hu_volume:
+        truncated_slices = []
+        for i, slice_data in enumerate(hu_volume):
             boundary_vals = slice_data[perimeter_mask]
             # Use 5 pixels as a robust threshold to ignore isolated random noise
             if np.sum(boundary_vals > skin_threshold) >= 5:
                 truncation_error = True
-                break
+                truncated_slices.append(i + 1)
 
         # --- Agent: NoiseWhisperer ---
         # Logic: Crop 20x20px regions from the four extreme corners (Background Air).
@@ -97,6 +98,11 @@ class QAEngine:
         voxel_vol = (float(datasets[0].PixelSpacing[0]) * float(datasets[0].PixelSpacing[1]) * float(datasets[0].SliceThickness)) / 1000.0
         gas_voxels = (hu_volume < -500) & body_mask # Adjusted threshold to -500 HU
         gas_volume_cc = float(np.sum(gas_voxels) * voxel_vol)
+        gas_slices = []
+        if gas_volume_cc > 0:
+            for i in range(hu_volume.shape[0]):
+                if np.any(gas_voxels[i]):
+                    gas_slices.append(i + 1)
 
         # --- Agent: ImplantAuditor ---
         # Logic: Detect high-density metal implants or devices (HU > 2000) inside the body.
@@ -104,6 +110,11 @@ class QAEngine:
         metal_voxels = (hu_volume > metal_threshold) & body_mask
         metal_volume_cc = float(np.sum(metal_voxels) * voxel_vol)
         metal_detected = metal_volume_cc > 0.05
+        metal_slices = []
+        if metal_detected:
+            for i in range(hu_volume.shape[0]):
+                if np.any(metal_voxels[i]):
+                    metal_slices.append(i + 1)
 
         # --- Pediatric Protocol Check ---
         # Both StudyDescription and ProtocolName contain "(Child)" or "(Adult)".
@@ -173,20 +184,57 @@ class QAEngine:
             "water_hu_estimate": water_hu_est,
             "fluid_median_hu": fluid_median,
             "gas_volume_cc": gas_volume_cc,
+            "gas_slices": gas_slices,
             "metal_detected": metal_detected,
             "metal_volume_cc": metal_volume_cc,
+            "metal_slices": metal_slices,
+            "truncated_slices": truncated_slices,
             "pediatric_mismatch": pediatric_mismatch,
             "pediatric_mismatch_message": pediatric_mismatch_message,
             "rescale_slope": rescale_slope,
         }
         return metrics
 
+    def _format_slices(self, slices: List[int]) -> str:
+        if not slices:
+            return ""
+        if len(slices) == 1:
+            return f" (Slice {slices[0]})"
+
+        # Group into ranges
+        slices = sorted(list(set(slices)))
+        ranges = []
+        if not slices:
+            return ""
+
+        start = slices[0]
+        end = slices[0]
+
+        for i in range(1, len(slices)):
+            if slices[i] == end + 1:
+                end = slices[i]
+            else:
+                if start == end:
+                    ranges.append(f"{start}")
+                else:
+                    ranges.append(f"{start}-{end}")
+                start = slices[i]
+                end = slices[i]
+
+        if start == end:
+            ranges.append(f"{start}")
+        else:
+            ranges.append(f"{start}-{end}")
+
+        return f" (Slices {', '.join(ranges)})"
+
     def _evaluate_rules(self, metrics: Dict[str, Any]) -> List[QAFlag]:
         flags = []
         
         # --- GeometryGuardian Responsibilities ---
         if metrics["truncation_detected"]:
-            flags.append(QAFlag(name="GeometryGuardian", status="REJECT", message="TRUNCATION_ERROR: Anatomy exceeds FOV"))
+            slice_info = self._format_slices(metrics.get("truncated_slices", []))
+            flags.append(QAFlag(name="GeometryGuardian", status="REJECT", message=f"TRUNCATION_ERROR: Anatomy exceeds FOV{slice_info}"))
         
         if metrics["slice_spacing_var"] > 1.0:
             flags.append(QAFlag(name="GeometryGuardian", status="REJECT", message=f"Slice spacing variation too high ({metrics['slice_spacing_var']:.2f}mm)"))
@@ -219,14 +267,17 @@ class QAEngine:
             flags.append(QAFlag(name="FluidPhysicist", status="REJECT", message="Invalid RescaleSlope (0)"))
 
         # --- CavityScout Responsibilities ---
-        if metrics["gas_volume_cc"] > 50.0:
-            flags.append(QAFlag(name="CavityScout", status="REJECT", message=f"Excessive gas volume ({metrics['gas_volume_cc']:.1f} cc)"))
-        elif metrics["gas_volume_cc"] > 15.0:
-            flags.append(QAFlag(name="CavityScout", status="CONDITIONAL", message=f"Moderate gas volume ({metrics['gas_volume_cc']:.1f} cc)"))
+        if metrics["gas_volume_cc"] > 15.0:
+            slice_info = self._format_slices(metrics.get("gas_slices", []))
+            if metrics["gas_volume_cc"] > 50.0:
+                flags.append(QAFlag(name="CavityScout", status="REJECT", message=f"Excessive gas volume ({metrics['gas_volume_cc']:.1f} cc){slice_info}"))
+            else:
+                flags.append(QAFlag(name="CavityScout", status="CONDITIONAL", message=f"Moderate gas volume ({metrics['gas_volume_cc']:.1f} cc){slice_info}"))
 
         # --- ImplantAuditor Responsibilities ---
         if metrics["metal_detected"]:
-            flags.append(QAFlag(name="ImplantAuditor", status="CONDITIONAL", message=f"METAL_IMPLANT: High-density metal detected ({metrics['metal_volume_cc']:.2f} cc). Verify implant/cardiac device safety."))
+            slice_info = self._format_slices(metrics.get("metal_slices", []))
+            flags.append(QAFlag(name="ImplantAuditor", status="CONDITIONAL", message=f"METAL_IMPLANT: High-density metal detected ({metrics['metal_volume_cc']:.2f} cc){slice_info}. Verify implant/cardiac device safety."))
 
         # --- Integrity (Shared/Lead Oversight) ---
         if metrics["pediatric_mismatch"]:
