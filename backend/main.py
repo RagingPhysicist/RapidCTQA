@@ -24,6 +24,7 @@ except ImportError:
     from backend.listener import DicomListener
     from backend.reporter import generate_pdf_report
 
+
 # Load webApp configuration
 with open("webApp.yaml", "r") as f:
     config_web = yaml.safe_load(f)
@@ -208,4 +209,4 @@ async def get_pdf_report(series_uid: str):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="127.0.0.1", port=8080)
