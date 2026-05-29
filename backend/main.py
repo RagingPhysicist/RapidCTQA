@@ -1,3 +1,28 @@
+from fastapi import FastAPI, BackgroundTasks, HTTPException
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.middleware.cors import CORSMiddleware
+import os
+import glob
+import pydicom
+import subprocess
+import sys
+import shutil
+import yaml
+from typing import List, Dict
+try:
+    from .models import QAResult, StudySummary, IngestionStatus
+    from .engine import QAEngine
+    from .listener import DicomListener
+    from .reporter import generate_pdf_report
+except ImportError:
+    import sys
+    # Add root folder to sys.path when running main.py directly
+    sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from backend.models import QAResult, StudySummary, IngestionStatus
+    from backend.engine import QAEngine
+    from backend.listener import DicomListener
+    from backend.reporter import generate_pdf_report
 
 
 # Load webApp configuration
