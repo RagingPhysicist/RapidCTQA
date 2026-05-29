@@ -8,7 +8,7 @@ import pydicom
 import subprocess
 import sys
 import shutil
-import pydicom
+import yaml
 from typing import List, Dict
 try:
     from .models import QAResult, StudySummary, IngestionStatus
@@ -23,7 +23,6 @@ except ImportError:
     from backend.engine import QAEngine
     from backend.listener import DicomListener
     from backend.reporter import generate_pdf_report
-import yaml
 
 # Load webApp configuration
 with open("webApp.yaml", "r") as f:
