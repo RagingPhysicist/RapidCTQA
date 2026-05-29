@@ -3,6 +3,7 @@ import pydicom
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import os, shutil, glob, sys, json, yaml
+import numpy as np
 from backend.engine import QAEngine
 
 # Load configuration
@@ -50,6 +51,7 @@ class DICOMViewer(ctk.CTkFrame):
         self.current_index = 0
         self.window_width = 1000 # Default
         self.window_level = 0    # Default
+        self.overlay_data = None
         
         self.fig, self.ax = plt.subplots(figsize=(5, 5), facecolor='#1a1a1a')
         self.canvas = FigureCanvasTkAgg(self.fig, master=self)
@@ -63,8 +65,13 @@ class DICOMViewer(ctk.CTkFrame):
         # Bind mouse wheel
         self.canvas.get_tk_widget().bind("<MouseWheel>", self._on_mousewheel)
 
+    def set_overlay_data(self, overlay_data):
+        self.overlay_data = overlay_data
+        self.display_slice(self.current_index)
+
     def load_series(self, files):
         self.files = sorted(files) # Sort by filename (usually contains instance number)
+        self.overlay_data = None
         if self.files:
             self.slider.configure(from_=0, to=len(self.files) - 1)
             self.display_slice(len(self.files) // 2)
@@ -94,6 +101,28 @@ class DICOMViewer(ctk.CTkFrame):
 
             self.ax.clear()
             self.ax.imshow(img, cmap='gray', vmin=vmin, vmax=vmax)
+
+            # --- Overlays ---
+            if self.overlay_data:
+                idx = self.current_index
+
+                # Metal mask: semi-transparent red
+                metal_masks = self.overlay_data.get("metal_masks", {})
+                if idx in metal_masks:
+                    mask = metal_masks[idx].astype(float)
+                    rgba = np.zeros((*mask.shape, 4))
+                    rgba[..., 0] = 1.0   # red
+                    rgba[..., 3] = mask * 0.55
+                    self.ax.imshow(rgba)
+
+                # Alignment landmarks: cyan circles + line
+                align_pts = self.overlay_data.get("alignment_points", {})
+                if idx in align_pts:
+                    (y1, x1), (y2, x2) = align_pts[idx]
+                    self.ax.plot([x1, x2], [y1, y2], color='cyan', linewidth=1.5, linestyle='--', alpha=0.85)
+                    self.ax.plot(x1, y1, 'o', color='cyan', markersize=7, alpha=0.9)
+                    self.ax.plot(x2, y2, 'o', color='cyan', markersize=7, alpha=0.9)
+
             self.ax.set_title(f"Slice: {self.current_index + 1} / {len(self.files)}", color="white")
             self.ax.axis('off')
             self.canvas.draw()
@@ -241,6 +270,7 @@ class ClinicalTriageApp(ctk.CTk):
         # Run Analysis
         try:
             result = self.engine.analyze_series(files)
+            self.viewer.set_overlay_data(result.overlay_data)
             
             self.flag_box.delete("0.0", "end")
             self.flag_box.insert("end", f"PATIENT: {result.patient_name}\n")
