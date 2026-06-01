@@ -61,13 +61,7 @@ Detects high-density metallic implants or devices.
 - **Volume Threshold**: To avoid false positives from small metallic skin markers, a volume threshold of **0.2 cc** is applied.
 - **Reporting**: Identifies the specific slices containing metal to assist in planning and artifact correction.
 
-### 6. AlignmentAuditor (Patient Tilt)
-Detects if the patient is rotated (roll/yaw) relative to the treatment couch.
-- **Bilateral Symmetry Method**: Identifies rigid, symmetrical bony landmarks (e.g., femoral heads, orbital sockets) by isolating structures > 250 HU.
-- **Tilt Calculation**: Computes the Center of Mass (CoM) for left and right landmarks. The tilt angle is calculated as $\theta = \tan^{-1}(\Delta Y / \Delta X)$.
-- **Threshold**: Flags a `TILT_WARNING` if rotation exceeds **2.0°**.
-
-### 7. Integrity (Protocol & Resolution)
+### 6. Integrity (Protocol & Resolution)
 Lead oversight for general series consistency.
 - **Pediatric Protocol Check**: Parses the DICOM `PatientAge` (VR: AS) to determine if a patient is a child (< 18Y) or adult. It validates this against "(Child)" or "(Adult)" markers in the `ProtocolName` and `StudyDescription`.
 - **Slice Resolution**:
