@@ -17,7 +17,7 @@ class QAEngine:
         patient_name = str(getattr(datasets[0], 'PatientName', 'Unknown'))
         protocol = str(getattr(datasets[0], 'ProtocolName', 'Unknown'))
         
-        metrics, overlay_data = self._compute_metrics(datasets)
+        metrics = self._compute_metrics(datasets)
         flags = self._evaluate_rules(metrics)
         
         status = "ACCEPT"
@@ -32,8 +32,7 @@ class QAEngine:
             protocol=protocol,
             status=status,
             metrics=metrics,
-            flags=flags,
-            overlay_data=overlay_data
+            flags=flags
         )
 
     def _compute_metrics(self, datasets: List[pydicom.Dataset]) -> Dict[str, Any]:
@@ -118,12 +117,10 @@ class QAEngine:
         metal_volume_cc = float(np.sum(metal_voxels) * voxel_vol)
         metal_detected = metal_volume_cc > metal_vol_limit
         metal_slices = []
-        # overlay_data: metal_masks keyed by 0-based slice index
-        metal_masks_by_slice: dict = {}
-        for i in range(hu_volume.shape[0]):
-            if np.any(metal_voxels[i]):
-                metal_slices.append(i + 1)
-                metal_masks_by_slice[i] = metal_voxels[i]
+        if metal_detected:
+            for i in range(hu_volume.shape[0]):
+                if np.any(metal_voxels[i]):
+                    metal_slices.append(i + 1)
 
         # --- Agent: AlignmentAuditor ---
         align_cfg = self.config.get("thresholds", {}).get("alignment", {})
@@ -132,7 +129,6 @@ class QAEngine:
 
         tilt_angles = []
         tilted_slices = []
-        alignment_points_by_slice: dict = {}  # {slice_idx: ((y1,x1), (y2,x2))}
 
         for i in range(hu_volume.shape[0]):
             slice_data = hu_volume[i]
@@ -158,26 +154,19 @@ class QAEngine:
                     l_idx = np.argmax(l_sizes) + 1
                     r_idx = np.argmax(r_sizes) + 1
 
-                    com_l = ndimage.center_of_mass(left_half, l_labels, l_idx)
-                    com_r = ndimage.center_of_mass(right_half, r_labels, r_idx)
+                    com_l = ndimage.center_of_mass(l_labels == l_idx)
+                    com_r = ndimage.center_of_mass(r_labels == r_idx)
 
                     # Adjust right COM X-coordinate back to full image space
                     y1, x1 = com_l
                     y2, x2 = com_r
                     x2 += mid_x
-                    # x2 is always > x1 by construction (right half vs left half),
-                    # so arctan2 result is in (-90°, 90°) — i.e. deviation from horizontal.
-                    # Guard: skip if vertical separation exceeds horizontal (angle > 45°) —
-                    # that indicates non-homologous structures (e.g. spine vs rib), not tilt.
-                    dy = abs(y2 - y1)
-                    dx = abs(x2 - x1)
-                    max_plausible_dy = 0.15 * slice_data.shape[0]  # 15% of image height
-                    if dx > 10 and dy < dx and dy < max_plausible_dy:
+
+                    if abs(x2 - x1) > 10: # Ensure landmarks are reasonably separated
                         angle = np.degrees(np.arctan2(y2 - y1, x2 - x1))
                         tilt_angles.append(angle)
                         if abs(angle) > tilt_limit:
                             tilted_slices.append(i + 1)
-                        alignment_points_by_slice[i] = ((y1, x1), (y2, x2))
 
         max_tilt = float(np.max(np.abs(tilt_angles))) if tilt_angles else 0.0
         tilt_warning = max_tilt > tilt_limit
@@ -261,11 +250,7 @@ class QAEngine:
             "pediatric_mismatch_message": pediatric_mismatch_message,
             "rescale_slope": rescale_slope,
         }
-        overlay_data = {
-            "metal_masks": metal_masks_by_slice,
-            "alignment_points": alignment_points_by_slice,
-        }
-        return metrics, overlay_data
+        return metrics
 
     def _format_slices(self, slices: List[int]) -> str:
         if not slices:

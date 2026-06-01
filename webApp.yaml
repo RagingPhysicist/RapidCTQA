@@ -39,7 +39,7 @@ backend:
 
   storage:
     type: filesystem
-    path: "\\\\imgserver\\DICOM\\rapidqa"
+    path: "data/rtct"
 
   api:
     base_url: "/api"
