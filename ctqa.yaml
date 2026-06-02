@@ -144,6 +144,9 @@ thresholds:
     metal_threshold_hu: 2000
     max_volume_cc: 0.2
 
+  alignment:
+    body_threshold_hu: -300
+    max_roll_tolerance_deg: 1.5
 
     prostate:
       rectal_diameter_cm:

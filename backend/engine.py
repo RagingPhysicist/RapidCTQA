@@ -122,9 +122,68 @@ class QAEngine:
                 if np.any(metal_voxels[i]):
                     metal_slices.append(i + 1)
 
-        # --- Agent: AlignmentAuditor (DISABLED) ---
-        max_tilt = 0.0
-        tilted_slices = []
+        # --- Agent: AlignmentAuditor (Inertial Principal Axes Evaluator) ---
+        align_cfg = self.config.get("thresholds", {}).get("alignment", {})
+        body_thresh = align_cfg.get("body_threshold_hu", -300)
+        roll_limit = align_cfg.get("max_roll_tolerance_deg", 1.5)
+
+        roll_angles = []
+        roll_slices = []
+
+        # Track roll across slices for twist detection
+        z_coords = []
+
+        for i in range(hu_volume.shape[0]):
+            slice_mask = hu_volume[i] > body_thresh
+            if np.sum(slice_mask) < 100: # Ignore slices with too little body mass
+                continue
+
+            y_coords, x_coords = np.where(slice_mask)
+            coords = np.column_stack((y_coords, x_coords))
+
+            # Compute Covariance Matrix
+            cov = np.cov(coords, rowvar=False)
+
+            # Eigendecomposition
+            evals, evecs = np.linalg.eigh(cov)
+
+            # The primary eigenvector corresponds to the largest eigenvalue (patient horizontal axis)
+            primary_evec = evecs[:, np.argmax(evals)]
+
+            # Calculate angle relative to image horizontal [0, 1]
+            # primary_evec is [v_y, v_x]
+            angle = np.degrees(np.arctan2(primary_evec[0], primary_evec[1]))
+
+            # Normalize angle to [-90, 90]
+            if angle > 90: angle -= 180
+            if angle < -90: angle += 180
+
+            roll_angles.append(angle)
+            z_coords.append(z_positions[i])
+
+            if abs(angle) > roll_limit:
+                roll_slices.append(i + 1)
+
+        max_roll = float(np.max(np.abs(roll_angles))) if roll_angles else 0.0
+
+        # Twist Detection: if theta changes > 1.0 deg over 10cm (100mm)
+        twist_detected = False
+        twist_slices = []
+        if len(roll_angles) > 1:
+            for i in range(len(roll_angles)):
+                for j in range(i + 1, len(roll_angles)):
+                    dist_mm = abs(z_coords[i] - z_coords[j])
+                    if dist_mm >= 100:
+                        angle_diff = abs(roll_angles[i] - roll_angles[j])
+                        # Rate-based twist: > 1.0 deg change per 10cm baseline
+                        if (angle_diff / (dist_mm / 100.0)) > 1.0:
+                            twist_detected = True
+                            # Find the original slice indices
+                            idx_i = z_positions.index(z_coords[i]) + 1
+                            idx_j = z_positions.index(z_coords[j]) + 1
+                            twist_slices.extend([idx_i, idx_j])
+
+        twist_slices = sorted(list(set(twist_slices)))
 
         # --- Pediatric Protocol Check ---
         # Both StudyDescription and ProtocolName contain "(Child)" or "(Adult)".
@@ -199,8 +258,10 @@ class QAEngine:
             "metal_volume_cc": metal_volume_cc,
             "metal_slices": metal_slices,
             "truncated_slices": truncated_slices,
-            "max_tilt_deg": max_tilt,
-            "tilted_slices": tilted_slices,
+            "max_roll_deg": max_roll,
+            "roll_slices": roll_slices,
+            "twist_detected": twist_detected,
+            "twist_slices": twist_slices,
             "pediatric_mismatch": pediatric_mismatch,
             "pediatric_mismatch_message": pediatric_mismatch_message,
             "rescale_slope": rescale_slope,
@@ -291,7 +352,24 @@ class QAEngine:
             slice_info = self._format_slices(metrics.get("metal_slices", []))
             flags.append(QAFlag(name="ImplantAuditor", status="CONDITIONAL", message=f"METAL_IMPLANT: High-density metal detected ({metrics['metal_volume_cc']:.2f} cc){slice_info}. Verify implant/cardiac device safety."))
 
-        # --- AlignmentAuditor Responsibilities (DISABLED) ---
+        # --- AlignmentAuditor Responsibilities ---
+        roll_limit = self.config.get("thresholds", {}).get("alignment", {}).get("max_roll_tolerance_deg", 1.5)
+
+        if metrics["max_roll_deg"] > roll_limit:
+            slice_info = self._format_slices(metrics.get("roll_slices", []))
+            flags.append(QAFlag(
+                name="AlignmentAuditor",
+                status="CONDITIONAL",
+                message=f"CRITICAL_TILT_ALERT: Patient roll exceeds tolerance ({metrics['max_roll_deg']:.1f}°){slice_info}"
+            ))
+
+        if metrics["twist_detected"]:
+            slice_info = self._format_slices(metrics.get("twist_slices", []))
+            flags.append(QAFlag(
+                name="AlignmentAuditor",
+                status="CONDITIONAL",
+                message=f"TWIST_YAW_ALERT: Significant spinal twist detected (>1.0° over 10cm){slice_info}"
+            ))
 
         # --- Integrity (Shared/Lead Oversight) ---
         if metrics["pediatric_mismatch"]:
