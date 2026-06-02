@@ -56,17 +56,19 @@ agents:
     logic: "Isolate voxels > metal_threshold_hu inside body mask. Trigger a conditional warning if total volume exceeds min_metal_volume_cc."
 
   - name: "AlignmentAuditor"
-    role: "Patient Orientation & Tilt Inspector"
-    description: "Detects if the patient is rotated (roll/yaw) relative to the treatment couch."
+    role: "Inertial Principal Axes Evaluator"
+    description: "Determines true patient roll/yaw by calculating the mathematical eigenvectors of the patient's mass distribution, eliminating local anatomical and respiratory false positives."
     parameters:
-      bone_threshold_hu: 250
-      max_allowable_tilt_deg: 2.0
+      body_threshold_hu: -300
+      max_roll_tolerance_deg: 1.5
     logic: |
-      1. Isolate high-density bone structures (>250 HU).
-      2. Identify prominent left/right bilateral landmark pairs (e.g., femoral heads or orbital sockets).
-      3. Compute the Center of Mass for the Left (X1, Y1) and Right (X2, Y2) landmarks.
-      4. Calculate tilt angle: theta = arctan((Y2 - Y1) / (X2 - X1)) * (180 / pi).
-      5. If absolute(theta) > max_allowable_tilt_deg, trigger 'TILT_WARNING'.
+      1. Generate a binary mask of the patient body (voxels > body_threshold_hu).
+      2. Extract the 2D/3D coordinate indices of all active voxels within the target region.
+      3. Compute the Covariance Matrix of the voxel coordinates.
+      4. Perform Eigendecomposition to determine the Principal Component vectors (eigenvectors).
+      5. Calculate the angle (theta) between the primary eigenvector and the horizontal image baseline.
+      6. If absolute(theta) > max_roll_tolerance_deg, trigger 'CRITICAL_TILT_ALERT'.
+      7. Track theta across consecutive slices along Z-axis; if theta changes > 1.0 deg over 10cm, trigger 'TWIST_YAW_ALERT'.
 
 - name: "ReviewerAgent"
     role: "Gatekeeper"
