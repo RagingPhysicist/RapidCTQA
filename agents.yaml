@@ -56,19 +56,19 @@ agents:
     logic: "Isolate voxels > metal_threshold_hu inside body mask. Trigger a conditional warning if total volume exceeds min_metal_volume_cc."
 
   - name: "AlignmentAuditor"
-    role: "Inertial Principal Axes Evaluator"
-    description: "Determines true patient roll/yaw by calculating the mathematical eigenvectors of the patient's mass distribution, eliminating local anatomical and respiratory false positives."
+    role: "Structural Shell Inertia Analyst"
+    description: "Evaluates patient roll and twist by extracting a solid outer body shell, computing its 2D/3D inertia tensor, and finding the angular deviation of its principal axes relative to the scanner bore."
     parameters:
       body_threshold_hu: -300
       max_roll_tolerance_deg: 1.5
+      max_yaw_drift_deg_per_cm: 0.1
     logic: |
-      1. Generate a binary mask of the patient body (voxels > body_threshold_hu).
-      2. Extract the 2D/3D coordinate indices of all active voxels within the target region.
-      3. Compute the Covariance Matrix of the voxel coordinates.
-      4. Perform Eigendecomposition to determine the Principal Component vectors (eigenvectors).
-      5. Calculate the angle (theta) between the primary eigenvector and the horizontal image baseline.
-      6. If absolute(theta) > max_roll_tolerance_deg, trigger 'CRITICAL_TILT_ALERT'.
-      7. Track theta across consecutive slices along Z-axis; if theta changes > 1.0 deg over 10cm, trigger 'TWIST_YAW_ALERT'.
+      1. Segment the global patient body mask using the body_threshold_hu.
+      2. Fill all internal air holes and soft-tissue variances to create a solid, uniformly weighted binary volume.
+      3. Compute the 2D/3D inertia tensor (covariance matrix of the spatial coordinates) of this filled volume.
+      4. Extract the eigenvectors. The primary eigenvector represents the true horizontal alignment of the patient's posture.
+      5. Compute the angular deviation (theta) from the horizontal machine axis.
+      6. Audit along the longitudinal (Z) axis: If theta exceeds max_roll_tolerance_deg on more than 3 consecutive slices, trigger 'ROLL_ALERT'. If the derivative of theta along Z exceeds max_yaw_drift_deg_per_cm, trigger 'TWIST_YAW_ALERT'.
 
 - name: "ReviewerAgent"
     role: "Gatekeeper"
