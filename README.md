@@ -29,7 +29,7 @@ RapidCTQA is a specialized automated Quality Assurance (QA) tool for radiotherap
     ```bash
     python run.py
     ```
-    The API will be available at `http://localhost:8000` and the DICOM listener at port `11112`.
+    The API will be available at `http://localhost:8080` and the DICOM listener at port `11112`.
 
 ## QA Agents & Logic
 

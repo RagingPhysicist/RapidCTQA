@@ -9,11 +9,11 @@ if exist .venv\Scripts\activate.bat (
 )
 
 echo Starting RapidCTQA Backend...
-echo Web Dashboard: http://localhost:8000
+echo Web Dashboard: http://localhost:8080
 echo.
 
 :: Automatically open the dashboard
-start http://localhost:8000
+start http://localhost:8080
 
 python run.py
 pause
