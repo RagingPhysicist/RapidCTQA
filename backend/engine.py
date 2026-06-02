@@ -1,6 +1,7 @@
 import pydicom
 import numpy as np
 import scipy.ndimage as ndimage
+from skimage.measure import inertia_tensor
 import yaml
 import os
 from typing import List, Dict, Any
@@ -122,66 +123,68 @@ class QAEngine:
                 if np.any(metal_voxels[i]):
                     metal_slices.append(i + 1)
 
-        # --- Agent: AlignmentAuditor (Inertial Principal Axes Evaluator) ---
+        # --- Agent: AlignmentAuditor (Structural Shell Inertia Analyst) ---
         align_cfg = self.config.get("thresholds", {}).get("alignment", {})
         body_thresh = align_cfg.get("body_threshold_hu", -300)
         roll_limit = align_cfg.get("max_roll_tolerance_deg", 1.5)
+        yaw_drift_limit = align_cfg.get("max_yaw_drift_deg_per_cm", 0.1)
 
         roll_angles = []
-        roll_slices = []
+        roll_slices_all = []
 
         # Track roll across slices for twist detection
         z_coords = []
 
         for i in range(hu_volume.shape[0]):
-            slice_mask = hu_volume[i] > body_thresh
-            if np.sum(slice_mask) < 100: # Ignore slices with too little body mass
+            body_mask = hu_volume[i] > body_thresh
+            if np.sum(body_mask) < 100:
                 continue
 
-            y_coords, x_coords = np.where(slice_mask)
-            coords = np.column_stack((y_coords, x_coords))
+            # CRITICAL FIX: Fill internal cavities to create solid mass profile
+            filled_mask = ndimage.binary_fill_holes(body_mask)
 
-            # Compute Covariance Matrix
-            cov = np.cov(coords, rowvar=False)
+            # Calculate Inertia Tensor
+            tensor = inertia_tensor(filled_mask)
 
             # Eigendecomposition
-            evals, evecs = np.linalg.eigh(cov)
+            evals, evecs = np.linalg.eigh(tensor)
 
-            # The primary eigenvector corresponds to the largest eigenvalue (patient horizontal axis)
-            primary_evec = evecs[:, np.argmax(evals)]
+            # Primary axis corresponds to the largest eigenvalue
+            primary_vector = evecs[:, 1]
+            angle_rad = np.arctan2(primary_vector[1], primary_vector[0])
+            angle_deg = np.degrees(angle_rad)
 
-            # Calculate angle relative to image horizontal [0, 1]
-            # primary_evec is [v_y, v_x]
-            angle = np.degrees(np.arctan2(primary_evec[0], primary_evec[1]))
+            # Normalize angle to [-45, 45] relative to horizontal
+            normalized_angle = (angle_deg + 45) % 90 - 45
 
-            # Normalize angle to [-90, 90]
-            if angle > 90: angle -= 180
-            if angle < -90: angle += 180
-
-            roll_angles.append(angle)
+            roll_angles.append(normalized_angle)
             z_coords.append(z_positions[i])
 
-            if abs(angle) > roll_limit:
-                roll_slices.append(i + 1)
+            if abs(normalized_angle) > roll_limit:
+                roll_slices_all.append(i + 1)
 
         max_roll = float(np.max(np.abs(roll_angles))) if roll_angles else 0.0
 
-        # Twist Detection: if theta changes > 1.0 deg over 10cm (100mm)
+        # 3 Consecutive Slice Rule for Roll Alert
+        roll_slices = []
+        for i in range(len(roll_slices_all) - 2):
+            if roll_slices_all[i+1] == roll_slices_all[i] + 1 and roll_slices_all[i+2] == roll_slices_all[i] + 2:
+                roll_slices.extend([roll_slices_all[i], roll_slices_all[i+1], roll_slices_all[i+2]])
+        roll_slices = sorted(list(set(roll_slices)))
+
+        # Twist Detection: if derivative of theta along Z > limit (deg/cm)
         twist_detected = False
         twist_slices = []
         if len(roll_angles) > 1:
-            for i in range(len(roll_angles)):
-                for j in range(i + 1, len(roll_angles)):
-                    dist_mm = abs(z_coords[i] - z_coords[j])
-                    if dist_mm >= 100:
-                        angle_diff = abs(roll_angles[i] - roll_angles[j])
-                        # Rate-based twist: > 1.0 deg change per 10cm baseline
-                        if (angle_diff / (dist_mm / 100.0)) > 1.0:
-                            twist_detected = True
-                            # Find the original slice indices
-                            idx_i = z_positions.index(z_coords[i]) + 1
-                            idx_j = z_positions.index(z_coords[j]) + 1
-                            twist_slices.extend([idx_i, idx_j])
+            for i in range(len(roll_angles) - 1):
+                dist_cm = abs(z_coords[i+1] - z_coords[i]) / 10.0
+                if dist_cm > 0:
+                    drift = abs(roll_angles[i+1] - roll_angles[i]) / dist_cm
+                    if drift > yaw_drift_limit:
+                        twist_detected = True
+                        idx_i = z_positions.index(z_coords[i]) + 1
+                        idx_j = z_positions.index(z_coords[i+1]) + 1
+                        twist_slices.extend([idx_i, idx_j])
 
         twist_slices = sorted(list(set(twist_slices)))
 
@@ -354,13 +357,14 @@ class QAEngine:
 
         # --- AlignmentAuditor Responsibilities ---
         roll_limit = self.config.get("thresholds", {}).get("alignment", {}).get("max_roll_tolerance_deg", 1.5)
+        yaw_drift_limit = self.config.get("thresholds", {}).get("alignment", {}).get("max_yaw_drift_deg_per_cm", 0.1)
 
-        if metrics["max_roll_deg"] > roll_limit:
+        if len(metrics.get("roll_slices", [])) > 0:
             slice_info = self._format_slices(metrics.get("roll_slices", []))
             flags.append(QAFlag(
                 name="AlignmentAuditor",
                 status="CONDITIONAL",
-                message=f"CRITICAL_TILT_ALERT: Patient roll exceeds tolerance ({metrics['max_roll_deg']:.1f}°){slice_info}"
+                message=f"ROLL_ALERT: Patient roll exceeds tolerance ({metrics['max_roll_deg']:.1f}°){slice_info}"
             ))
 
         if metrics["twist_detected"]:
@@ -368,7 +372,7 @@ class QAEngine:
             flags.append(QAFlag(
                 name="AlignmentAuditor",
                 status="CONDITIONAL",
-                message=f"TWIST_YAW_ALERT: Significant spinal twist detected (>1.0° over 10cm){slice_info}"
+                message=f"TWIST_YAW_ALERT: Significant spinal twist detected (>{yaw_drift_limit}°/cm){slice_info}"
             ))
 
         # --- Integrity (Shared/Lead Oversight) ---

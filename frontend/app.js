@@ -84,7 +84,7 @@ async function viewStudy(seriesUid) {
           <p><strong>Bkg Air Noise:</strong> ${result.metrics.background_air_sd.toFixed(2)} HU</p>
           <p><strong>Fluid Density:</strong> ${result.metrics.fluid_median_hu.toFixed(1)} HU</p>
           <p><strong>Gas Volume:</strong> ${result.metrics.gas_volume_cc.toFixed(1)} cc</p>
-          <p><strong>Patient Tilt:</strong> ${result.metrics.max_tilt_deg ? result.metrics.max_tilt_deg.toFixed(1) : '0.0'}°</p>
+          <p><strong>Patient Roll:</strong> ${result.metrics.max_roll_deg ? result.metrics.max_roll_deg.toFixed(1) : '0.0'}°</p>
           <p><strong>Slices:</strong> ${result.metrics.slice_count}</p>
         </div>
         <div>
