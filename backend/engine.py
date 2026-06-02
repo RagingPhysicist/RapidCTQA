@@ -122,54 +122,68 @@ class QAEngine:
                 if np.any(metal_voxels[i]):
                     metal_slices.append(i + 1)
 
-        # --- Agent: AlignmentAuditor ---
+        # --- Agent: AlignmentAuditor (Inertial Principal Axes Evaluator) ---
         align_cfg = self.config.get("thresholds", {}).get("alignment", {})
-        bone_thresh = align_cfg.get("bone_threshold_hu", 250)
-        tilt_limit = align_cfg.get("max_allowable_tilt_deg", 2.0)
+        body_thresh = align_cfg.get("body_threshold_hu", -300)
+        roll_limit = align_cfg.get("max_roll_tolerance_deg", 1.5)
 
-        tilt_angles = []
-        tilted_slices = []
+        roll_angles = []
+        roll_slices = []
+
+        # Track roll across slices for twist detection
+        z_coords = []
 
         for i in range(hu_volume.shape[0]):
-            slice_data = hu_volume[i]
-            bone_mask = slice_data > bone_thresh
-
-            if not np.any(bone_mask):
+            slice_mask = hu_volume[i] > body_thresh
+            if np.sum(slice_mask) < 100: # Ignore slices with too little body mass
                 continue
 
-            # Split into left and right halves to find bilateral landmarks
-            mid_x = slice_data.shape[1] // 2
-            left_half = bone_mask[:, :mid_x]
-            right_half = bone_mask[:, mid_x:]
+            y_coords, x_coords = np.where(slice_mask)
+            coords = np.column_stack((y_coords, x_coords))
 
-            if np.any(left_half) and np.any(right_half):
-                # Find largest connected component in each half as landmarks
-                l_labels, l_num = ndimage.label(left_half)
-                r_labels, r_num = ndimage.label(right_half)
+            # Compute Covariance Matrix
+            cov = np.cov(coords, rowvar=False)
 
-                if l_num > 0 and r_num > 0:
-                    l_sizes = ndimage.sum(left_half, l_labels, range(1, l_num + 1))
-                    r_sizes = ndimage.sum(right_half, r_labels, range(1, r_num + 1))
+            # Eigendecomposition
+            evals, evecs = np.linalg.eigh(cov)
 
-                    l_idx = np.argmax(l_sizes) + 1
-                    r_idx = np.argmax(r_sizes) + 1
+            # The primary eigenvector corresponds to the largest eigenvalue (patient horizontal axis)
+            primary_evec = evecs[:, np.argmax(evals)]
 
-                    com_l = ndimage.center_of_mass(l_labels == l_idx)
-                    com_r = ndimage.center_of_mass(r_labels == r_idx)
+            # Calculate angle relative to image horizontal [0, 1]
+            # primary_evec is [v_y, v_x]
+            angle = np.degrees(np.arctan2(primary_evec[0], primary_evec[1]))
 
-                    # Adjust right COM X-coordinate back to full image space
-                    y1, x1 = com_l
-                    y2, x2 = com_r
-                    x2 += mid_x
+            # Normalize angle to [-90, 90]
+            if angle > 90: angle -= 180
+            if angle < -90: angle += 180
 
-                    if abs(x2 - x1) > 10: # Ensure landmarks are reasonably separated
-                        angle = np.degrees(np.arctan2(y2 - y1, x2 - x1))
-                        tilt_angles.append(angle)
-                        if abs(angle) > tilt_limit:
-                            tilted_slices.append(i + 1)
+            roll_angles.append(angle)
+            z_coords.append(z_positions[i])
 
-        max_tilt = float(np.max(np.abs(tilt_angles))) if tilt_angles else 0.0
-        tilt_warning = max_tilt > tilt_limit
+            if abs(angle) > roll_limit:
+                roll_slices.append(i + 1)
+
+        max_roll = float(np.max(np.abs(roll_angles))) if roll_angles else 0.0
+
+        # Twist Detection: if theta changes > 1.0 deg over 10cm (100mm)
+        twist_detected = False
+        twist_slices = []
+        if len(roll_angles) > 1:
+            for i in range(len(roll_angles)):
+                for j in range(i + 1, len(roll_angles)):
+                    dist_mm = abs(z_coords[i] - z_coords[j])
+                    if dist_mm >= 100:
+                        angle_diff = abs(roll_angles[i] - roll_angles[j])
+                        # Rate-based twist: > 1.0 deg change per 10cm baseline
+                        if (angle_diff / (dist_mm / 100.0)) > 1.0:
+                            twist_detected = True
+                            # Find the original slice indices
+                            idx_i = z_positions.index(z_coords[i]) + 1
+                            idx_j = z_positions.index(z_coords[j]) + 1
+                            twist_slices.extend([idx_i, idx_j])
+
+        twist_slices = sorted(list(set(twist_slices)))
 
         # --- Pediatric Protocol Check ---
         # Both StudyDescription and ProtocolName contain "(Child)" or "(Adult)".
@@ -244,8 +258,10 @@ class QAEngine:
             "metal_volume_cc": metal_volume_cc,
             "metal_slices": metal_slices,
             "truncated_slices": truncated_slices,
-            "max_tilt_deg": max_tilt,
-            "tilted_slices": tilted_slices,
+            "max_roll_deg": max_roll,
+            "roll_slices": roll_slices,
+            "twist_detected": twist_detected,
+            "twist_slices": twist_slices,
             "pediatric_mismatch": pediatric_mismatch,
             "pediatric_mismatch_message": pediatric_mismatch_message,
             "rescale_slope": rescale_slope,
@@ -337,13 +353,23 @@ class QAEngine:
             flags.append(QAFlag(name="ImplantAuditor", status="CONDITIONAL", message=f"METAL_IMPLANT: High-density metal detected ({metrics['metal_volume_cc']:.2f} cc){slice_info}. Verify implant/cardiac device safety."))
 
         # --- AlignmentAuditor Responsibilities ---
-        if metrics["max_tilt_deg"] > 0:
-            align_limit = self.config.get("thresholds", {}).get("alignment", {}).get("max_allowable_tilt_deg", 2.0)
-            status = "ACCEPT"
-            if metrics["max_tilt_deg"] > align_limit:
-                status = "CONDITIONAL"
-                slice_info = self._format_slices(metrics.get("tilted_slices", []))
-                flags.append(QAFlag(name="AlignmentAuditor", status=status, message=f"TILT_WARNING: Patient rotation detected ({metrics['max_tilt_deg']:.1f}°){slice_info}"))
+        roll_limit = self.config.get("thresholds", {}).get("alignment", {}).get("max_roll_tolerance_deg", 1.5)
+
+        if metrics["max_roll_deg"] > roll_limit:
+            slice_info = self._format_slices(metrics.get("roll_slices", []))
+            flags.append(QAFlag(
+                name="AlignmentAuditor",
+                status="CONDITIONAL",
+                message=f"CRITICAL_TILT_ALERT: Patient roll exceeds tolerance ({metrics['max_roll_deg']:.1f}°){slice_info}"
+            ))
+
+        if metrics["twist_detected"]:
+            slice_info = self._format_slices(metrics.get("twist_slices", []))
+            flags.append(QAFlag(
+                name="AlignmentAuditor",
+                status="CONDITIONAL",
+                message=f"TWIST_YAW_ALERT: Significant spinal twist detected (>1.0° over 10cm){slice_info}"
+            ))
 
         # --- Integrity (Shared/Lead Oversight) ---
         if metrics["pediatric_mismatch"]:
