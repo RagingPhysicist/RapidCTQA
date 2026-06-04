@@ -135,19 +135,46 @@ class QAEngine:
         # Track roll across slices for twist detection
         z_coords = []
 
+        # First pass: compute the body masks and their areas to find the maximum cross-sectional area
+        valid_masks = {}
         for i in range(hu_volume.shape[0]):
             body_mask = hu_volume[i] > body_thresh
             if np.sum(body_mask) < 100:
                 continue
 
-            # CRITICAL FIX: Fill internal cavities to create solid mass profile
             filled_mask = ndimage.binary_fill_holes(body_mask)
+            labeled_mask, num_labels = ndimage.label(filled_mask)
+            if num_labels > 1:
+                sizes = ndimage.sum(filled_mask, labeled_mask, range(1, num_labels + 1))
+                largest_label = np.argmax(sizes) + 1
+                filled_mask = (labeled_mask == largest_label)
+
+            valid_masks[i] = (filled_mask, np.sum(filled_mask))
+
+        max_area = max(item[1] for item in valid_masks.values()) if valid_masks else 0
+
+        # Second pass: calculate patient roll and twist on valid torso slices
+        raw_roll_angles = []
+        for i in range(hu_volume.shape[0]):
+            if i not in valid_masks:
+                continue
+
+            filled_mask, area = valid_masks[i]
+
+            # Skip leg/neck slices that have less than 50% of the max torso area
+            if area < 0.5 * max_area:
+                continue
 
             # Calculate Inertia Tensor
             tensor = inertia_tensor(filled_mask)
 
             # Eigendecomposition
             evals, evecs = np.linalg.eigh(tensor)
+
+            ratio = evals[1] / evals[0] if evals[0] > 0 else 0
+            # Skip nearly circular cross-sections (e.g. ratio < 2.0) to avoid angular instability
+            if ratio < 2.0:
+                continue
 
             # Primary axis corresponds to the largest eigenvalue
             primary_vector = evecs[:, 1]
@@ -157,11 +184,19 @@ class QAEngine:
             # Normalize angle to [-45, 45] relative to horizontal
             normalized_angle = (angle_deg + 45) % 90 - 45
 
-            roll_angles.append(normalized_angle)
+            raw_roll_angles.append(normalized_angle)
             z_coords.append(z_positions[i])
 
-            if abs(normalized_angle) > roll_limit:
-                roll_slices_all.append(i + 1)
+        # Apply median filter to smooth out transient contacts/spikes (e.g. arms touching)
+        if raw_roll_angles:
+            roll_angles = ndimage.median_filter(raw_roll_angles, size=15).tolist()
+            for idx, angle in enumerate(roll_angles):
+                # Retrieve the original slice number (1-based index)
+                slice_idx = z_positions.index(z_coords[idx])
+                if abs(angle) > roll_limit:
+                    roll_slices_all.append(slice_idx + 1)
+        else:
+            roll_angles = []
 
         max_roll = float(np.max(np.abs(roll_angles))) if roll_angles else 0.0
 
