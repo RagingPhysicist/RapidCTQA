@@ -247,7 +247,11 @@ class QAEngine:
             "gas_slices": gas_slices,
             "metal_detected": metal_detected,
             "metal_volume_cc": metal_volume_cc,
+            "metal_inside_cc": metal_inside_cc,
+            "metal_outside_cc": metal_outside_cc,
             "metal_slices": metal_slices,
+            "metal_inside_slices": metal_inside_slices,
+            "metal_outside_slices": metal_outside_slices,
             "truncated_slices": truncated_slices,
             "max_tilt_deg": max_tilt,
             "tilted_slices": tilted_slices,
@@ -337,9 +341,14 @@ class QAEngine:
                 flags.append(QAFlag(name="CavityScout", status="CONDITIONAL", message=f"Moderate gas volume ({metrics['gas_volume_cc']:.1f} cc){slice_info}"))
 
         # --- ImplantAuditor Responsibilities ---
-        if metrics["metal_detected"]:
-            slice_info = self._format_slices(metrics.get("metal_slices", []))
-            flags.append(QAFlag(name="ImplantAuditor", status="CONDITIONAL", message=f"METAL_IMPLANT: High-density metal detected ({metrics['metal_volume_cc']:.2f} cc){slice_info}. Verify implant/cardiac device safety."))
+        metal_limit = self.config.get("thresholds", {}).get("implants", {}).get("max_volume_cc", 0.05)
+        if metrics.get("metal_inside_cc", 0) > metal_limit:
+            slice_info = self._format_slices(metrics.get("metal_inside_slices", []))
+            flags.append(QAFlag(name="ImplantAuditor", status="CONDITIONAL", message=f"INTERNAL_METAL: High-density metal detected inside body ({metrics['metal_inside_cc']:.2f} cc){slice_info}. Verify implant/cardiac device safety."))
+
+        if metrics.get("metal_outside_cc", 0) > metal_limit:
+            slice_info = self._format_slices(metrics.get("metal_outside_slices", []))
+            flags.append(QAFlag(name="ImplantAuditor", status="CONDITIONAL", message=f"EXTERNAL_METAL: High-density metal detected outside body ({metrics['metal_outside_cc']:.2f} cc){slice_info}. Verify no external objects are present."))
 
         # --- AlignmentAuditor Responsibilities ---
         align_limit = self.config.get("thresholds", {}).get("alignment", {}).get("max_allowable_tilt_deg", 3.0)
