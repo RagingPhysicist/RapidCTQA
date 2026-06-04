@@ -1,8 +1,10 @@
 fastapi
-uvicorn
-pynetdicom
-pydicom
+fpdf2==2.8.7
 numpy
-pyyaml
-python-multipart
 pydantic
+pydicom
+pynetdicom
+python-multipart
+pyyaml
+scipy==1.17.1
+uvicorn

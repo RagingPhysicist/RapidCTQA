@@ -1,4 +1,4 @@
-const API_BASE = 'http://localhost:8000/api';
+const API_BASE = '/api';
 
 async function fetchStatus() {
   try {
@@ -84,6 +84,7 @@ async function viewStudy(seriesUid) {
           <p><strong>Bkg Air Noise:</strong> ${result.metrics.background_air_sd.toFixed(2)} HU</p>
           <p><strong>Fluid Density:</strong> ${result.metrics.fluid_median_hu.toFixed(1)} HU</p>
           <p><strong>Gas Volume:</strong> ${result.metrics.gas_volume_cc.toFixed(1)} cc</p>
+          <p><strong>Patient Tilt:</strong> ${result.metrics.max_tilt_deg ? result.metrics.max_tilt_deg.toFixed(1) : '0.0'}°</p>
           <p><strong>Slices:</strong> ${result.metrics.slice_count}</p>
         </div>
         <div>
@@ -100,6 +101,7 @@ async function viewStudy(seriesUid) {
     modal.style.display = 'flex';
   } catch (error) {
     console.error('Failed to fetch study detail:', error);
+    alert('Failed to load report. Please ensure the analysis is complete.');
   }
 }
 

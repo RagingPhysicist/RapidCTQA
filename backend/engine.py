@@ -1,5 +1,6 @@
 import pydicom
 import numpy as np
+import scipy.ndimage as ndimage
 import yaml
 import os
 from typing import List, Dict, Any
@@ -57,12 +58,13 @@ class QAEngine:
         
         # Check if any slice has non-air pixels touching the perimeter
         truncation_error = False
-        for slice_data in hu_volume:
+        truncated_slices = []
+        for i, slice_data in enumerate(hu_volume):
             boundary_vals = slice_data[perimeter_mask]
             # Use 5 pixels as a robust threshold to ignore isolated random noise
             if np.sum(boundary_vals > skin_threshold) >= 5:
                 truncation_error = True
-                break
+                truncated_slices.append(i + 1)
 
         # --- Agent: NoiseWhisperer ---
         # Logic: Crop 20x20px regions from the four extreme corners (Background Air).
@@ -97,35 +99,127 @@ class QAEngine:
         voxel_vol = (float(datasets[0].PixelSpacing[0]) * float(datasets[0].PixelSpacing[1]) * float(datasets[0].SliceThickness)) / 1000.0
         gas_voxels = (hu_volume < -500) & body_mask # Adjusted threshold to -500 HU
         gas_volume_cc = float(np.sum(gas_voxels) * voxel_vol)
+        gas_slices = []
+        if gas_volume_cc > 0:
+            for i in range(hu_volume.shape[0]):
+                if np.any(gas_voxels[i]):
+                    gas_slices.append(i + 1)
 
         # --- Agent: ImplantAuditor ---
         # Logic: Detect high-density metal implants or devices (HU > 2000) inside the body.
-        metal_threshold = 2000
+        # Use a more restrictive body mask (exclude skin markers) by simple perimeter erosion if needed,
+        # but here we'll use the threshold from config and increase it to ignore small marker balls.
+        implant_cfg = self.config.get("thresholds", {}).get("implants", {})
+        metal_threshold = implant_cfg.get("metal_threshold_hu", 2000)
+        metal_vol_limit = implant_cfg.get("max_volume_cc", 0.05)
+
         metal_voxels = (hu_volume > metal_threshold) & body_mask
         metal_volume_cc = float(np.sum(metal_voxels) * voxel_vol)
-        metal_detected = metal_volume_cc > 0.05
+        metal_detected = metal_volume_cc > metal_vol_limit
+        metal_slices = []
+        if metal_detected:
+            for i in range(hu_volume.shape[0]):
+                if np.any(metal_voxels[i]):
+                    metal_slices.append(i + 1)
+
+        # --- Agent: AlignmentAuditor ---
+        align_cfg = self.config.get("thresholds", {}).get("alignment", {})
+        bone_thresh = align_cfg.get("bone_threshold_hu", 250)
+        tilt_limit = align_cfg.get("max_allowable_tilt_deg", 3.0)
+
+        tilt_angles = []
+        tilted_slices = []
+
+        for i in range(hu_volume.shape[0]):
+            slice_data = hu_volume[i]
+            bone_mask = slice_data > bone_thresh
+
+            if not np.any(bone_mask):
+                continue
+
+            # Split into left and right halves to find bilateral landmarks
+            mid_x = slice_data.shape[1] // 2
+            left_half = bone_mask[:, :mid_x]
+            right_half = bone_mask[:, mid_x:]
+
+            if np.any(left_half) and np.any(right_half):
+                # Find largest connected component in each half as landmarks
+                l_labels, l_num = ndimage.label(left_half)
+                r_labels, r_num = ndimage.label(right_half)
+
+                if l_num > 0 and r_num > 0:
+                    l_sizes = ndimage.sum(left_half, l_labels, range(1, l_num + 1))
+                    r_sizes = ndimage.sum(right_half, r_labels, range(1, r_num + 1))
+
+                    l_idx = np.argmax(l_sizes) + 1
+                    r_idx = np.argmax(r_sizes) + 1
+
+                    com_l = ndimage.center_of_mass(l_labels == l_idx)
+                    com_r = ndimage.center_of_mass(r_labels == r_idx)
+
+                    # Adjust right COM X-coordinate back to full image space
+                    y1, x1 = com_l
+                    y2, x2 = com_r
+                    x2 += mid_x
+
+                    if abs(x2 - x1) > 10: # Ensure landmarks are reasonably separated
+                        angle = np.degrees(np.arctan2(y2 - y1, x2 - x1))
+                        tilt_angles.append(angle)
+                        if abs(angle) > tilt_limit:
+                            tilted_slices.append(i + 1)
+
+        max_tilt = float(np.max(np.abs(tilt_angles))) if tilt_angles else 0.0
 
         # --- Pediatric Protocol Check ---
         # Both StudyDescription and ProtocolName contain "(Child)" or "(Adult)".
-        # Mismatch = patient age marker doesn't match protocol marker.
+        # Mismatch = patient age marker doesn't match protocol marker, OR age itself contradicts marker.
         study_desc = str(getattr(datasets[0], 'StudyDescription', ''))
         protocol = str(getattr(datasets[0], 'ProtocolName', ''))
+        patient_age_str = str(getattr(datasets[0], 'PatientAge', ''))
+
         pediatric_mismatch = False
         pediatric_mismatch_message = ""
+
+        # Parse PatientAge (DICOM VR: AS - nnnY, nnnM, nnnW, nnnD)
+        age_years = None
+        if patient_age_str and len(patient_age_str) == 4:
+            try:
+                value = int(patient_age_str[:3])
+                unit = patient_age_str[3].upper()
+                if unit == 'Y':
+                    age_years = value
+                elif unit == 'M':
+                    age_years = value / 12.0
+                elif unit == 'W':
+                    age_years = value / 52.17
+                elif unit == 'D':
+                    age_years = value / 365.25
+            except ValueError:
+                pass
+
+        patient_is_child = age_years is not None and age_years < 18
+        patient_is_adult = age_years is not None and age_years >= 18
 
         study_is_child = "(Child)" in study_desc
         study_is_adult = "(Adult)" in study_desc
         protocol_is_child = "(Child)" in protocol
         protocol_is_adult = "(Adult)" in protocol
 
-        # Only evaluate when both fields carry a recognised marker
-        if (study_is_child or study_is_adult) and (protocol_is_child or protocol_is_adult):
-            if study_is_child and protocol_is_adult:
+        # Rule 1: Patient age vs Protocol/Study markers
+        if patient_is_child:
+            if study_is_adult or protocol_is_adult:
                 pediatric_mismatch = True
-                pediatric_mismatch_message = f"PEDIATRIC_MISMATCH: Child patient scanned with Adult protocol '{protocol}'."
-            elif study_is_adult and protocol_is_child:
+                pediatric_mismatch_message = f"PEDIATRIC_MISMATCH: Child patient ({patient_age_str}) scanned with Adult protocol/study."
+        elif patient_is_adult:
+            if study_is_child or protocol_is_child:
                 pediatric_mismatch = True
-                pediatric_mismatch_message = f"PEDIATRIC_MISMATCH: Adult patient scanned with Child protocol '{protocol}'."
+                pediatric_mismatch_message = f"PEDIATRIC_MISMATCH: Adult patient ({patient_age_str}) scanned with Child protocol/study."
+
+        # Rule 2: Study marker vs Protocol marker mismatch (legacy check)
+        if not pediatric_mismatch:
+            if (study_is_child and protocol_is_adult) or (study_is_adult and protocol_is_child):
+                pediatric_mismatch = True
+                pediatric_mismatch_message = f"PEDIATRIC_MISMATCH: Protocol '{protocol}' does not match Study Description '{study_desc}'."
 
         metrics = {
             "series_uid": datasets[0].SeriesInstanceUID,
@@ -144,20 +238,59 @@ class QAEngine:
             "water_hu_estimate": water_hu_est,
             "fluid_median_hu": fluid_median,
             "gas_volume_cc": gas_volume_cc,
+            "gas_slices": gas_slices,
             "metal_detected": metal_detected,
             "metal_volume_cc": metal_volume_cc,
+            "metal_slices": metal_slices,
+            "truncated_slices": truncated_slices,
+            "max_tilt_deg": max_tilt,
+            "tilted_slices": tilted_slices,
             "pediatric_mismatch": pediatric_mismatch,
             "pediatric_mismatch_message": pediatric_mismatch_message,
             "rescale_slope": rescale_slope,
         }
         return metrics
 
+    def _format_slices(self, slices: List[int]) -> str:
+        if not slices:
+            return ""
+        if len(slices) == 1:
+            return f" (Slice {slices[0]})"
+
+        # Group into ranges
+        slices = sorted(list(set(slices)))
+        ranges = []
+        if not slices:
+            return ""
+
+        start = slices[0]
+        end = slices[0]
+
+        for i in range(1, len(slices)):
+            if slices[i] == end + 1:
+                end = slices[i]
+            else:
+                if start == end:
+                    ranges.append(f"{start}")
+                else:
+                    ranges.append(f"{start}-{end}")
+                start = slices[i]
+                end = slices[i]
+
+        if start == end:
+            ranges.append(f"{start}")
+        else:
+            ranges.append(f"{start}-{end}")
+
+        return f" (Slices {', '.join(ranges)})"
+
     def _evaluate_rules(self, metrics: Dict[str, Any]) -> List[QAFlag]:
         flags = []
         
         # --- GeometryGuardian Responsibilities ---
         if metrics["truncation_detected"]:
-            flags.append(QAFlag(name="GeometryGuardian", status="REJECT", message="TRUNCATION_ERROR: Anatomy exceeds FOV"))
+            slice_info = self._format_slices(metrics.get("truncated_slices", []))
+            flags.append(QAFlag(name="GeometryGuardian", status="REJECT", message=f"TRUNCATION_ERROR: Anatomy exceeds FOV{slice_info}"))
         
         if metrics["slice_spacing_var"] > 1.0:
             flags.append(QAFlag(name="GeometryGuardian", status="REJECT", message=f"Slice spacing variation too high ({metrics['slice_spacing_var']:.2f}mm)"))
@@ -190,14 +323,23 @@ class QAEngine:
             flags.append(QAFlag(name="FluidPhysicist", status="REJECT", message="Invalid RescaleSlope (0)"))
 
         # --- CavityScout Responsibilities ---
-        if metrics["gas_volume_cc"] > 50.0:
-            flags.append(QAFlag(name="CavityScout", status="REJECT", message=f"Excessive gas volume ({metrics['gas_volume_cc']:.1f} cc)"))
-        elif metrics["gas_volume_cc"] > 15.0:
-            flags.append(QAFlag(name="CavityScout", status="CONDITIONAL", message=f"Moderate gas volume ({metrics['gas_volume_cc']:.1f} cc)"))
+        if metrics["gas_volume_cc"] > 15.0:
+            slice_info = self._format_slices(metrics.get("gas_slices", []))
+            if metrics["gas_volume_cc"] > 50.0:
+                flags.append(QAFlag(name="CavityScout", status="REJECT", message=f"Excessive gas volume ({metrics['gas_volume_cc']:.1f} cc){slice_info}"))
+            else:
+                flags.append(QAFlag(name="CavityScout", status="CONDITIONAL", message=f"Moderate gas volume ({metrics['gas_volume_cc']:.1f} cc){slice_info}"))
 
         # --- ImplantAuditor Responsibilities ---
         if metrics["metal_detected"]:
-            flags.append(QAFlag(name="ImplantAuditor", status="CONDITIONAL", message=f"METAL_IMPLANT: High-density metal detected ({metrics['metal_volume_cc']:.2f} cc). Verify implant/cardiac device safety."))
+            slice_info = self._format_slices(metrics.get("metal_slices", []))
+            flags.append(QAFlag(name="ImplantAuditor", status="CONDITIONAL", message=f"METAL_IMPLANT: High-density metal detected ({metrics['metal_volume_cc']:.2f} cc){slice_info}. Verify implant/cardiac device safety."))
+
+        # --- AlignmentAuditor Responsibilities ---
+        align_limit = self.config.get("thresholds", {}).get("alignment", {}).get("max_allowable_tilt_deg", 3.0)
+        if metrics["max_tilt_deg"] > align_limit:
+            slice_info = self._format_slices(metrics.get("tilted_slices", []))
+            flags.append(QAFlag(name="AlignmentAuditor", status="CONDITIONAL", message=f"TILT_WARNING: Patient rotation detected ({metrics['max_tilt_deg']:.1f}°){slice_info}"))
 
         # --- Integrity (Shared/Lead Oversight) ---
         if metrics["pediatric_mismatch"]:
