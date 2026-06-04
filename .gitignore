@@ -35,6 +35,7 @@ data/rtct/*
 !data/rtct/.gitkeep
 TPS_EXPORT/*
 !TPS_EXPORT/.gitkeep
+reports/
 CT/
 *.log
 .env
