@@ -107,42 +107,73 @@ class QAEngine:
 
         # --- Agent: ImplantAuditor ---
         # Build a per-slice filled body contour to accurately distinguish
-        # metal that is inside the patient from external markers/devices.
-        # body_mask (> -500) gives the raw tissue boundary; fill_holes makes it solid.
+        # metal that is truly inside the patient from external markers or
+        # objects resting on the patient's skin (surface).
         implant_cfg = self.config.get("thresholds", {}).get("implants", {})
         metal_threshold = implant_cfg.get("metal_threshold_hu", 2000)
         metal_vol_limit = implant_cfg.get("max_volume_cc", 0.05)
 
         all_metal_voxels = hu_volume > metal_threshold
 
-        # Per-slice filled body contour for inside/outside classification
+        # Body/Interior masks
+        # 1. raw_body: Basic threshold to find patient + table
+        # 2. patient_mask: Remove the table by keeping only the largest component
+        # 3. interior_mask: Filled patient mask
+        # 4. shrunk_mask: interior_mask eroded to ignore skin-surface objects
+        patient_mask = np.zeros_like(hu_volume, dtype=bool)
+        shrunk_mask = np.zeros_like(hu_volume, dtype=bool)
         interior_mask = np.zeros_like(hu_volume, dtype=bool)
+
+        # Morphological erosion disk (~10mm)
+        erosion_px = int(10.0 / float(datasets[0].PixelSpacing[0]))
+
         for i in range(hu_volume.shape[0]):
             raw = hu_volume[i] > -500
-            if np.any(raw):
-                interior_mask[i] = ndimage.binary_fill_holes(raw)
+            if not np.any(raw):
+                continue
 
-        metal_inside = all_metal_voxels & interior_mask
-        metal_outside = all_metal_voxels & ~interior_mask
+            # Label components to find the patient (usually largest central object)
+            labeled, num_features = ndimage.label(raw)
+            if num_features > 0:
+                # Find component with largest area
+                sizes = ndimage.sum(raw, labeled, range(num_features + 1))
+                main_label = np.argmax(sizes[1:]) + 1
+                patient_slice = (labeled == main_label)
+                patient_mask[i] = patient_slice
 
-        metal_inside_cc = float(np.sum(metal_inside) * voxel_vol)
-        metal_outside_cc = float(np.sum(metal_outside) * voxel_vol)
-        metal_volume_cc = metal_inside_cc + metal_outside_cc
-        metal_detected = metal_inside_cc > metal_vol_limit or metal_outside_cc > metal_vol_limit
+                # Filled interior
+                filled = ndimage.binary_fill_holes(patient_slice)
+                interior_mask[i] = filled
+
+                # Shrunk interior (skin-surface buffer)
+                shrunk_mask[i] = ndimage.binary_erosion(filled, iterations=erosion_px)
+
+        metal_internal = all_metal_voxels & shrunk_mask
+        metal_surface = all_metal_voxels & interior_mask & ~shrunk_mask
+        metal_external = all_metal_voxels & ~interior_mask
+
+        metal_internal_cc = float(np.sum(metal_internal) * voxel_vol)
+        metal_surface_cc = float(np.sum(metal_surface) * voxel_vol)
+        metal_external_cc = float(np.sum(metal_external) * voxel_vol)
+        metal_detected = (metal_internal_cc > metal_vol_limit or
+                          metal_surface_cc > metal_vol_limit or
+                          metal_external_cc > metal_vol_limit)
 
         metal_slices = []
-        metal_inside_slices = []
-        metal_outside_slices = []
+        metal_internal_slices = []
+        metal_surface_slices = []
+        metal_external_slices = []
+
         if np.any(all_metal_voxels):
             for i in range(hu_volume.shape[0]):
-                has_inside = np.any(metal_inside[i])
-                has_outside = np.any(metal_outside[i])
-                if has_inside or has_outside:
+                if np.any(all_metal_voxels[i]):
                     metal_slices.append(i + 1)
-                if has_inside:
-                    metal_inside_slices.append(i + 1)
-                if has_outside:
-                    metal_outside_slices.append(i + 1)
+                if np.any(metal_internal[i]):
+                    metal_internal_slices.append(i + 1)
+                if np.any(metal_surface[i]):
+                    metal_surface_slices.append(i + 1)
+                if np.any(metal_external[i]):
+                    metal_external_slices.append(i + 1)
 
         # --- Agent: AlignmentAuditor ---
         # Use ImageOrientationPatient (IOP) to detect patient roll.
@@ -246,12 +277,14 @@ class QAEngine:
             "gas_volume_cc": gas_volume_cc,
             "gas_slices": gas_slices,
             "metal_detected": metal_detected,
-            "metal_volume_cc": metal_volume_cc,
-            "metal_inside_cc": metal_inside_cc,
-            "metal_outside_cc": metal_outside_cc,
+            "metal_volume_cc": metal_internal_cc + metal_surface_cc + metal_external_cc,
+            "metal_internal_cc": metal_internal_cc,
+            "metal_surface_cc": metal_surface_cc,
+            "metal_external_cc": metal_external_cc,
             "metal_slices": metal_slices,
-            "metal_inside_slices": metal_inside_slices,
-            "metal_outside_slices": metal_outside_slices,
+            "metal_internal_slices": metal_internal_slices,
+            "metal_surface_slices": metal_surface_slices,
+            "metal_external_slices": metal_external_slices,
             "truncated_slices": truncated_slices,
             "max_tilt_deg": max_tilt,
             "tilted_slices": tilted_slices,
@@ -342,13 +375,17 @@ class QAEngine:
 
         # --- ImplantAuditor Responsibilities ---
         metal_limit = self.config.get("thresholds", {}).get("implants", {}).get("max_volume_cc", 0.05)
-        if metrics.get("metal_inside_cc", 0) > metal_limit:
-            slice_info = self._format_slices(metrics.get("metal_inside_slices", []))
-            flags.append(QAFlag(name="ImplantAuditor", status="CONDITIONAL", message=f"INTERNAL_METAL: High-density metal detected inside body ({metrics['metal_inside_cc']:.2f} cc){slice_info}. Verify implant/cardiac device safety."))
+        if metrics.get("metal_internal_cc", 0) > metal_limit:
+            slice_info = self._format_slices(metrics.get("metal_internal_slices", []))
+            flags.append(QAFlag(name="ImplantAuditor", status="CONDITIONAL", message=f"INTERNAL_METAL: High-density metal detected deep inside body ({metrics['metal_internal_cc']:.2f} cc){slice_info}. Verify implant/cardiac device safety."))
 
-        if metrics.get("metal_outside_cc", 0) > metal_limit:
-            slice_info = self._format_slices(metrics.get("metal_outside_slices", []))
-            flags.append(QAFlag(name="ImplantAuditor", status="CONDITIONAL", message=f"EXTERNAL_METAL: High-density metal detected outside body ({metrics['metal_outside_cc']:.2f} cc){slice_info}. Verify no external objects are present."))
+        if metrics.get("metal_surface_cc", 0) > metal_limit:
+            slice_info = self._format_slices(metrics.get("metal_surface_slices", []))
+            flags.append(QAFlag(name="ImplantAuditor", status="CONDITIONAL", message=f"SURFACE_METAL: High-density metal detected on patient skin/surface ({metrics['metal_surface_cc']:.2f} cc){slice_info}. Verify if markers or external objects."))
+
+        if metrics.get("metal_external_cc", 0) > metal_limit:
+            slice_info = self._format_slices(metrics.get("metal_external_slices", []))
+            flags.append(QAFlag(name="ImplantAuditor", status="CONDITIONAL", message=f"EXTERNAL_METAL: High-density metal detected outside body ({metrics['metal_external_cc']:.2f} cc){slice_info}. Verify no external objects are present."))
 
         # --- AlignmentAuditor Responsibilities ---
         align_limit = self.config.get("thresholds", {}).get("alignment", {}).get("max_allowable_tilt_deg", 3.0)
