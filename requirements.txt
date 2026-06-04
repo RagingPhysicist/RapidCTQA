@@ -7,5 +7,4 @@ pynetdicom
 python-multipart
 pyyaml
 scipy==1.17.1
-scikit-image
 uvicorn

@@ -56,19 +56,18 @@ agents:
     logic: "Isolate voxels > metal_threshold_hu inside body mask. Trigger a conditional warning if total volume exceeds min_metal_volume_cc."
 
   - name: "AlignmentAuditor"
-    role: "Structural Shell Inertia Analyst"
-    description: "Evaluates patient roll and twist by extracting a solid outer body shell, computing its 2D/3D inertia tensor, and finding the angular deviation of its principal axes relative to the scanner bore."
+    role: "Patient Orientation & Tilt Inspector"
+    description: "Detects if the patient is rotated (roll/yaw) relative to the treatment couch."
     parameters:
-      body_threshold_hu: -300
-      max_roll_tolerance_deg: 1.5
-      max_yaw_drift_deg_per_cm: 0.1
+      bone_threshold_hu: 250
+      max_allowable_tilt_deg: 3.0
     logic: |
-      1. Segment the global patient body mask using the body_threshold_hu.
-      2. Fill all internal air holes and soft-tissue variances to create a solid, uniformly weighted binary volume.
-      3. Compute the 2D/3D inertia tensor (covariance matrix of the spatial coordinates) of this filled volume.
-      4. Extract the eigenvectors. The primary eigenvector represents the true horizontal alignment of the patient's posture.
-      5. Compute the angular deviation (theta) from the horizontal machine axis.
-      6. Audit along the longitudinal (Z) axis: If theta exceeds max_roll_tolerance_deg on more than 3 consecutive slices, trigger 'ROLL_ALERT'. If the derivative of theta along Z exceeds max_yaw_drift_deg_per_cm, trigger 'TWIST_YAW_ALERT'.
+      1. Isolate high-density bone structures (>250 HU).
+      2. Identify prominent left/right bilateral landmark pairs (e.g., femoral heads or orbital sockets).
+      3. Compute the Center of Mass for the Left (X1, Y1) and Right (X2, Y2) landmarks.
+      4. Calculate tilt angle: theta = arctan((Y2 - Y1) / (X2 - X1)) * (180 / pi).
+      5. If absolute(theta) > max_allowable_tilt_deg, trigger 'TILT_WARNING'.
+
 
 - name: "ReviewerAgent"
     role: "Gatekeeper"

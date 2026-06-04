@@ -145,9 +145,9 @@ thresholds:
     max_volume_cc: 0.2
 
   alignment:
-    body_threshold_hu: -300
-    max_roll_tolerance_deg: 1.5
-    max_yaw_drift_deg_per_cm: 0.1
+    bone_threshold_hu: 250
+    max_allowable_tilt_deg: 3.0
+
 
     prostate:
       rectal_diameter_cm:
