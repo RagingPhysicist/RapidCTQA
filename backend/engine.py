@@ -106,69 +106,75 @@ class QAEngine:
                     gas_slices.append(i + 1)
 
         # --- Agent: ImplantAuditor ---
-        # Logic: Detect high-density metal implants or devices (HU > 2000) inside the body.
-        # Use a more restrictive body mask (exclude skin markers) by simple perimeter erosion if needed,
-        # but here we'll use the threshold from config and increase it to ignore small marker balls.
+        # Build a per-slice filled body contour to accurately distinguish
+        # metal that is inside the patient from external markers/devices.
+        # body_mask (> -500) gives the raw tissue boundary; fill_holes makes it solid.
         implant_cfg = self.config.get("thresholds", {}).get("implants", {})
         metal_threshold = implant_cfg.get("metal_threshold_hu", 2000)
         metal_vol_limit = implant_cfg.get("max_volume_cc", 0.05)
 
-        metal_voxels = (hu_volume > metal_threshold) & body_mask
-        metal_volume_cc = float(np.sum(metal_voxels) * voxel_vol)
-        metal_detected = metal_volume_cc > metal_vol_limit
+        all_metal_voxels = hu_volume > metal_threshold
+
+        # Per-slice filled body contour for inside/outside classification
+        interior_mask = np.zeros_like(hu_volume, dtype=bool)
+        for i in range(hu_volume.shape[0]):
+            raw = hu_volume[i] > -500
+            if np.any(raw):
+                interior_mask[i] = ndimage.binary_fill_holes(raw)
+
+        metal_inside = all_metal_voxels & interior_mask
+        metal_outside = all_metal_voxels & ~interior_mask
+
+        metal_inside_cc = float(np.sum(metal_inside) * voxel_vol)
+        metal_outside_cc = float(np.sum(metal_outside) * voxel_vol)
+        metal_volume_cc = metal_inside_cc + metal_outside_cc
+        metal_detected = metal_inside_cc > metal_vol_limit or metal_outside_cc > metal_vol_limit
+
         metal_slices = []
-        if metal_detected:
+        metal_inside_slices = []
+        metal_outside_slices = []
+        if np.any(all_metal_voxels):
             for i in range(hu_volume.shape[0]):
-                if np.any(metal_voxels[i]):
+                has_inside = np.any(metal_inside[i])
+                has_outside = np.any(metal_outside[i])
+                if has_inside or has_outside:
                     metal_slices.append(i + 1)
+                if has_inside:
+                    metal_inside_slices.append(i + 1)
+                if has_outside:
+                    metal_outside_slices.append(i + 1)
 
         # --- Agent: AlignmentAuditor ---
+        # Use ImageOrientationPatient (IOP) to detect patient roll.
+        # IOP is recorded by the scanner at acquisition time and directly encodes
+        # how the patient is oriented in scanner coordinates — no image processing needed.
+        #
+        # For a perfectly aligned supine patient:
+        #   row cosines = [1, 0, 0]  (image columns run along scanner X)
+        #   col cosines = [0, 1, 0]  (image rows run along scanner Y)
+        #
+        # Patient roll rotates the row vector away from [1, 0, 0].
+        # We compute roll as the per-slice deviation of IOP[0:3] from the ideal.
+        # If IOP varies across slices, we report the worst-case value.
         align_cfg = self.config.get("thresholds", {}).get("alignment", {})
-        bone_thresh = align_cfg.get("bone_threshold_hu", 250)
         tilt_limit = align_cfg.get("max_allowable_tilt_deg", 3.0)
 
-        tilt_angles = []
+        iop_rolls = []
         tilted_slices = []
 
-        for i in range(hu_volume.shape[0]):
-            slice_data = hu_volume[i]
-            bone_mask = slice_data > bone_thresh
-
-            if not np.any(bone_mask):
+        for i, ds in enumerate(datasets):
+            iop = getattr(ds, 'ImageOrientationPatient', None)
+            if iop is None:
                 continue
+            iop = [float(v) for v in iop]
+            row_x, row_y = iop[0], iop[1]
+            # Roll in degrees: deviation of the row vector's XY projection from ideal [1, 0]
+            roll_deg = float(np.degrees(np.arctan2(row_y, row_x)))
+            iop_rolls.append(roll_deg)
+            if abs(roll_deg) > tilt_limit:
+                tilted_slices.append(i + 1)
 
-            # Split into left and right halves to find bilateral landmarks
-            mid_x = slice_data.shape[1] // 2
-            left_half = bone_mask[:, :mid_x]
-            right_half = bone_mask[:, mid_x:]
-
-            if np.any(left_half) and np.any(right_half):
-                # Find largest connected component in each half as landmarks
-                l_labels, l_num = ndimage.label(left_half)
-                r_labels, r_num = ndimage.label(right_half)
-
-                if l_num > 0 and r_num > 0:
-                    l_sizes = ndimage.sum(left_half, l_labels, range(1, l_num + 1))
-                    r_sizes = ndimage.sum(right_half, r_labels, range(1, r_num + 1))
-
-                    l_idx = np.argmax(l_sizes) + 1
-                    r_idx = np.argmax(r_sizes) + 1
-
-                    com_l = ndimage.center_of_mass(l_labels == l_idx)
-                    com_r = ndimage.center_of_mass(r_labels == r_idx)
-
-                    # Adjust right COM X-coordinate back to full image space
-                    y1, x1 = com_l
-                    y2, x2 = com_r
-                    x2 += mid_x
-
-                    if abs(x2 - x1) > 10: # Ensure landmarks are reasonably separated
-                        angle = np.degrees(np.arctan2(y2 - y1, x2 - x1))
-                        tilt_angles.append(angle)
-                        if abs(angle) > tilt_limit:
-                            tilted_slices.append(i + 1)
-
-        max_tilt = float(np.max(np.abs(tilt_angles))) if tilt_angles else 0.0
+        max_tilt = float(np.max(np.abs(iop_rolls))) if iop_rolls else 0.0
 
         # --- Pediatric Protocol Check ---
         # Both StudyDescription and ProtocolName contain "(Child)" or "(Adult)".
