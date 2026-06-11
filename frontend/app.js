@@ -34,7 +34,7 @@ async function fetchStudies() {
         <td>
           <div class="actions-cell">
             <button class="view-btn" onclick="viewStudy('${study.series_uid}')">View Report</button>
-            <button class="view-btn" style="background: var(--secondary);" onclick="launchCockpit('${study.series_uid}')">Cockpit</button>
+            <button class="view-btn" style="background: var(--secondary);" onclick="launchCockpit('${study.series_uid}')">View Scan</button>
           </div>
         </td>
       `;

@@ -1,0 +1,16 @@
+{
+  "version": "1.0",
+  "updated_at": "2026-06-11",
+  "description": "Network routing configuration for automated radiotherapy QA pipeline destinations",
+  "dicom_destinations": [
+    {
+      "ae_title": "MVSEG",
+      "ip_address": "192.168.132.94",
+      "port": 11112,
+      "description": "MVision Autosegmentation service",
+      "is_active": true,
+      "timeout_seconds": 30,
+      "connection_type": "C-STORE"
+    }
+  ]
+}

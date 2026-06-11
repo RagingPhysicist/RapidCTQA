@@ -1,9 +1,12 @@
 import customtkinter as ctk
 import pydicom
 import matplotlib.pyplot as plt
+import numpy as np
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import os, shutil, glob, sys, json, yaml
+import threading
 from backend.engine import QAEngine
+from backend.dicom_sender import send_dicom_series
 
 # Load configuration
 def normalise_storage_path(path: str) -> str:
@@ -39,6 +42,13 @@ try:
 except Exception as e:
     print(f"Error loading webApp.yaml: {e}")
     STORAGE_DIR = "./data/rtct"
+
+try:
+    with open("ctqa.yaml", "r") as f:
+        config_ctqa = yaml.safe_load(f)
+    METAL_THRESHOLD = config_ctqa.get("thresholds", {}).get("implants", {}).get("metal_threshold_hu", 2000)
+except Exception:
+    METAL_THRESHOLD = 2000
 
 EXPORT_DIR = "./TPS_EXPORT"
 os.makedirs(EXPORT_DIR, exist_ok=True)
@@ -94,6 +104,12 @@ class DICOMViewer(ctk.CTkFrame):
 
             self.ax.clear()
             self.ax.imshow(img, cmap='gray', vmin=vmin, vmax=vmax)
+            
+            # Outline metal/implants if present (> METAL_THRESHOLD HU)
+            metal_mask = img > METAL_THRESHOLD
+            if np.any(metal_mask):
+                self.ax.contour(metal_mask, colors='#ff3b30', levels=[0.5], linewidths=1.2)
+
             self.ax.set_title(f"Slice: {self.current_index + 1} / {len(self.files)}", color="white")
             self.ax.axis('off')
             self.canvas.draw()
@@ -196,7 +212,12 @@ class ClinicalTriageApp(ctk.CTk):
     def on_closing(self):
         if self.after_id:
             self.after_cancel(self.after_id)
-        self.destroy()
+        try:
+            plt.close('all')
+        except Exception:
+            pass
+        self.withdraw()
+        self.quit()
 
     def _on_wl_change(self, preset_name):
         if preset_name in self.wl_presets:
@@ -257,15 +278,29 @@ class ClinicalTriageApp(ctk.CTk):
             self.flag_box.insert("end", f"Analysis Error: {e}")
 
     def approve(self):
-        if self.current_series_path:
-            dest = os.path.join(EXPORT_DIR, self.current_series_uid)
-            if os.path.exists(dest): shutil.rmtree(dest)
-            shutil.copytree(self.current_series_path, dest)
-            
+        if not self.current_series_path:
+            self.status_lbl.configure(text="No series loaded", text_color="#ff0000")
+            return
+        # Copy series to export directory
+        dest = os.path.join(EXPORT_DIR, self.current_series_uid)
+        if os.path.exists(dest):
+            shutil.rmtree(dest)
+        shutil.copytree(self.current_series_path, dest)
+        # Debug logs
+        print(f"[DEBUG] Copied series {self.current_series_uid} to {dest}")
+        # Send DICOM series synchronously with error handling
+        try:
+            print(f"Manual approval for {self.current_series_uid} - Routing to DICOM destinations...")
+            send_dicom_series(self.current_series_path)
+            print("[DEBUG] DICOM routing completed successfully.")
             self.status_lbl.configure(text="APPROVED - EXPORTED", text_color="#28a745")
-            self.current_series_path = None
-            self.flag_box.delete("0.0", "end")
-            self.after(1000, self.on_closing) # Brief delay to show success
+        except Exception as e:
+            print(f"[ERROR] DICOM routing failed: {e}")
+            self.status_lbl.configure(text="APPROVAL FAILED", text_color="#ff0000")
+        # Clean up UI state
+        self.current_series_path = None
+        self.flag_box.delete("0.0", "end")
+        self.after(1000, self.on_closing)  # Brief delay to show success or failure
 
     def reject(self):
         if self.current_series_path:

@@ -141,7 +141,7 @@ thresholds:
       reject_cc: 300
 
   implants:
-    metal_threshold_hu: 2000
+    metal_threshold_hu: 3000
     max_volume_cc: 0.2
 
   alignment:

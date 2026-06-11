@@ -15,6 +15,7 @@ try:
     from .engine import QAEngine
     from .listener import DicomListener
     from .reporter import generate_pdf_report
+    from .dicom_sender import send_dicom_series
 except ImportError:
     import sys
     # Add root folder to sys.path when running main.py directly
@@ -23,6 +24,7 @@ except ImportError:
     from backend.engine import QAEngine
     from backend.listener import DicomListener
     from backend.reporter import generate_pdf_report
+    from backend.dicom_sender import send_dicom_series
 
 # Load webApp configuration
 with open("webApp.yaml", "r") as f:
@@ -98,6 +100,9 @@ def on_series_received(series_uid: str):
             if not os.path.exists(dest):
                 print(f"Auto-exporting {series_uid} to TPS...")
                 shutil.copytree(study_path, dest)
+            
+            print(f"Auto-routing accepted series {series_uid} to DICOM destinations...")
+            send_dicom_series(study_path)
 
 listener = DicomListener(STORAGE_DIR, on_series_received)
 
