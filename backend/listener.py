@@ -6,6 +6,8 @@ import threading
 from typing import Callable, Dict
 
 class DicomListener:
+    STABILITY_SECONDS = 10  # wait this long after the last file before triggering
+
     def __init__(self, storage_dir: str, callback: Callable[[str], None]):
         self.storage_dir = storage_dir
         self.callback = callback
@@ -19,7 +21,6 @@ class DicomListener:
         
         handlers = [
             (evt.EVT_C_STORE, self._handle_store),
-            (evt.EVT_RELEASED, self._handle_release)
         ]
         
         self.server = ae.start_server((host, port), block=False, evt_handlers=handlers)
@@ -38,28 +39,28 @@ class DicomListener:
         
         with self._lock:
             self.series_tracker[series_uid] = self.series_tracker.get(series_uid, 0) + 1
-            # Reset/Cancel timer if it exists
+            count = self.series_tracker[series_uid]
+
+            # Reset debounce timer on every incoming file
             if series_uid in self.timers:
                 self.timers[series_uid].cancel()
+
+            timer = threading.Timer(
+                self.STABILITY_SECONDS,
+                self._trigger_callback,
+                args=[series_uid],
+            )
+            self.timers[series_uid] = timer
+            timer.start()
             
+        if count % 50 == 0:
+            print(f"Receiving series {series_uid}: {count} files so far...")
+
         return 0x0000
 
-    def _handle_release(self, event):
-        # Debounce: wait 5 seconds before triggering callback
-        with self._lock:
-            for series_uid in list(self.series_tracker.keys()):
-                if series_uid in self.timers:
-                    self.timers[series_uid].cancel()
-                
-                timer = threading.Timer(5.0, self._trigger_callback, args=[series_uid])
-                self.timers[series_uid] = timer
-                timer.start()
-
     def _trigger_callback(self, series_uid: str):
-        print(f"Series {series_uid} seems complete. Triggering analysis...")
         with self._lock:
-            if series_uid in self.series_tracker:
-                self.callback(series_uid)
-                del self.series_tracker[series_uid]
-            if series_uid in self.timers:
-                del self.timers[series_uid]
+            count = self.series_tracker.pop(series_uid, 0)
+            self.timers.pop(series_uid, None)
+        print(f"Series {series_uid} stable ({count} files, no new data for {self.STABILITY_SECONDS}s). Triggering analysis...")
+        self.callback(series_uid)

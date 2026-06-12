@@ -3,6 +3,7 @@ import numpy as np
 import scipy.ndimage as ndimage
 import yaml
 import os
+from concurrent.futures import ThreadPoolExecutor
 from typing import List, Dict, Any
 from .models import QAResult, QAFlag
 
@@ -12,7 +13,9 @@ class QAEngine:
             self.config = yaml.safe_load(f)
 
     def analyze_series(self, dicom_files: List[str]) -> QAResult:
-        datasets = [pydicom.dcmread(f) for f in dicom_files]
+        # Parallelise IO-bound DICOM reads
+        with ThreadPoolExecutor() as pool:
+            datasets = list(pool.map(pydicom.dcmread, dicom_files))
         series_uid = datasets[0].SeriesInstanceUID
         patient_name = str(getattr(datasets[0], 'PatientName', 'Unknown'))
         protocol = str(getattr(datasets[0], 'ProtocolName', 'Unknown'))
@@ -127,26 +130,23 @@ class QAEngine:
         # Morphological erosion disk (~10mm)
         erosion_px = int(10.0 / float(datasets[0].PixelSpacing[0]))
 
-        for i in range(hu_volume.shape[0]):
+        def _process_slice(i: int):
+            """Compute per-slice body masks; ndimage calls release the GIL."""
             raw = hu_volume[i] > -500
             if not np.any(raw):
-                continue
-
-            # Label components to find the patient (usually largest central object)
+                return
             labeled, num_features = ndimage.label(raw)
             if num_features > 0:
-                # Find component with largest area
                 sizes = ndimage.sum(raw, labeled, range(num_features + 1))
                 main_label = np.argmax(sizes[1:]) + 1
                 patient_slice = (labeled == main_label)
                 patient_mask[i] = patient_slice
-
-                # Filled interior
                 filled = ndimage.binary_fill_holes(patient_slice)
                 interior_mask[i] = filled
-
-                # Shrunk interior (skin-surface buffer)
                 shrunk_mask[i] = ndimage.binary_erosion(filled, iterations=erosion_px)
+
+        with ThreadPoolExecutor() as pool:
+            list(pool.map(_process_slice, range(hu_volume.shape[0])))
 
         metal_internal = all_metal_voxels & shrunk_mask
         metal_surface = all_metal_voxels & interior_mask & ~shrunk_mask

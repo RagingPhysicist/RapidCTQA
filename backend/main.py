@@ -3,12 +3,15 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 import os
+from datetime import datetime, timedelta
 import glob
 import pydicom
 import subprocess
 import sys
 import shutil
+import threading
 import yaml
+from concurrent.futures import ThreadPoolExecutor
 from typing import List, Dict
 try:
     from .models import QAResult, StudySummary, IngestionStatus
@@ -83,8 +86,51 @@ os.makedirs(STORAGE_DIR, exist_ok=True)
 os.makedirs(EXPORT_DIR, exist_ok=True)
 os.makedirs(REPORTS_DIR, exist_ok=True)
 
+
+def _cleanup_old_directories():
+    """Remove stale data at startup.
+
+    STORAGE_DIR: keep only series received today.
+    EXPORT_DIR:  keep only exports less than 24 hours old.
+    """
+    today = datetime.now().date()
+    one_day_ago = datetime.now() - timedelta(days=1)
+
+    # --- STORAGE_DIR: keep today only ---
+    for entry in os.listdir(STORAGE_DIR):
+        path = os.path.join(STORAGE_DIR, entry)
+        if not os.path.isdir(path):
+            continue
+        try:
+            mtime = datetime.fromtimestamp(os.path.getmtime(path))
+        except (OSError, ValueError, OverflowError):
+            continue
+        if mtime.date() < today:
+            print(f"Cleanup: removing old series {entry} from storage (modified {mtime.date()})")
+            shutil.rmtree(path, ignore_errors=True)
+
+    # --- EXPORT_DIR: keep last 24 h ---
+    for entry in os.listdir(EXPORT_DIR):
+        path = os.path.join(EXPORT_DIR, entry)
+        if not os.path.isdir(path):
+            continue
+        try:
+            mtime = datetime.fromtimestamp(os.path.getmtime(path))
+        except (OSError, ValueError, OverflowError):
+            continue
+        if mtime < one_day_ago:
+            print(f"Cleanup: removing old export {entry} from TPS_EXPORT (modified {mtime})")
+            shutil.rmtree(path, ignore_errors=True)
+
+
+_cleanup_old_directories()
+
 engine = QAEngine(os.path.join(ROOT_DIR, "ctqa.yaml"))
 results_cache: Dict[str, QAResult] = {}
+results_cache_lock = threading.Lock()
+
+# Pool for concurrent series analysis (IO + CPU-bound work per series)
+analysis_pool = ThreadPoolExecutor(max_workers=4)
 
 # Serve frontend
 @app.get("/")
@@ -99,7 +145,8 @@ def on_series_received(series_uid: str):
     dicom_files = glob.glob(os.path.join(study_path, "*.dcm"))
     if dicom_files:
         result = engine.analyze_series(dicom_files)
-        results_cache[series_uid] = result
+        with results_cache_lock:
+            results_cache[series_uid] = result
         print(f"Analysis complete for {series_uid}: {result.status}")
         
         # Generate PDF report automatically in reports folder
@@ -115,12 +162,16 @@ def on_series_received(series_uid: str):
             dest = os.path.join(EXPORT_DIR, series_uid)
             if not os.path.exists(dest):
                 print(f"Auto-exporting {series_uid} to TPS...")
-                shutil.copytree(study_path, dest)
+                shutil.copytree(study_path, dest, dirs_exist_ok=True)
             
             print(f"Auto-routing accepted series {series_uid} to DICOM destinations...")
             send_dicom_series(study_path)
 
-listener = DicomListener(STORAGE_DIR, on_series_received)
+def _submit_series(series_uid: str):
+    """Submit a series for analysis on the shared thread pool."""
+    analysis_pool.submit(on_series_received, series_uid)
+
+listener = DicomListener(STORAGE_DIR, _submit_series)
 
 @app.on_event("startup")
 async def startup_event():
