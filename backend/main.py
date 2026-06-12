@@ -26,8 +26,10 @@ except ImportError:
     from backend.reporter import generate_pdf_report
     from backend.dicom_sender import send_dicom_series
 
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
 # Load webApp configuration
-with open("webApp.yaml", "r") as f:
+with open(os.path.join(ROOT_DIR, "webApp.yaml"), "r") as f:
     config_web = yaml.safe_load(f)
 
 app = FastAPI(title="RapidCTQA API")
@@ -66,16 +68,22 @@ def normalise_storage_path(path: str) -> str:
                 pass
     return path
 
-STORAGE_DIR = normalise_storage_path(config_web.get("backend", {}).get("storage", {}).get("path", "./data/rtct"))
-EXPORT_DIR = "./TPS_EXPORT"
-REPORTS_DIR = "./reports"
-FRONTEND_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "frontend")
+raw_storage_path = config_web.get("backend", {}).get("storage", {}).get("path", "")
+if not raw_storage_path:
+    raw_storage_path = os.path.join(ROOT_DIR, "data", "rtct")
+elif not os.path.isabs(raw_storage_path):
+    raw_storage_path = os.path.join(ROOT_DIR, raw_storage_path)
+
+STORAGE_DIR = normalise_storage_path(raw_storage_path)
+EXPORT_DIR = os.path.join(ROOT_DIR, "TPS_EXPORT")
+REPORTS_DIR = os.path.join(ROOT_DIR, "reports")
+FRONTEND_DIR = os.path.join(ROOT_DIR, "frontend")
 print(f"Using storage directory: {STORAGE_DIR}")
 os.makedirs(STORAGE_DIR, exist_ok=True)
 os.makedirs(EXPORT_DIR, exist_ok=True)
 os.makedirs(REPORTS_DIR, exist_ok=True)
 
-engine = QAEngine("ctqa.yaml")
+engine = QAEngine(os.path.join(ROOT_DIR, "ctqa.yaml"))
 results_cache: Dict[str, QAResult] = {}
 
 # Serve frontend
@@ -93,6 +101,14 @@ def on_series_received(series_uid: str):
         result = engine.analyze_series(dicom_files)
         results_cache[series_uid] = result
         print(f"Analysis complete for {series_uid}: {result.status}")
+        
+        # Generate PDF report automatically in reports folder
+        pdf_path = os.path.join(REPORTS_DIR, f"QA_Report_{series_uid}.pdf")
+        try:
+            generate_pdf_report(result, pdf_path)
+            print(f"PDF report generated automatically: {pdf_path}")
+        except Exception as e:
+            print(f"Error auto-generating PDF report: {e}")
         
         # Auto-export if ACCEPTED
         if result.status == "ACCEPT":
@@ -181,8 +197,9 @@ async def run_validation(series_uid: str, background_tasks: BackgroundTasks):
 @app.post("/api/launch_cockpit/{series_uid}")
 async def launch_cockpit(series_uid: str):
     try:
-        # Launch cockpit.py with the current python executable
-        subprocess.Popen([sys.executable, "cockpit.py", series_uid])
+        # Launch cockpit.py with the current python executable in the root directory
+        cockpit_path = os.path.join(ROOT_DIR, "cockpit.py")
+        subprocess.Popen([sys.executable, cockpit_path, series_uid], cwd=ROOT_DIR)
         return {"message": f"Cockpit launched for {series_uid}"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to launch cockpit: {str(e)}")
