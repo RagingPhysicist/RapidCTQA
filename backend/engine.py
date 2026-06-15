@@ -152,6 +152,49 @@ class QAEngine:
         metal_surface = all_metal_voxels & interior_mask & ~shrunk_mask
         metal_external = all_metal_voxels & ~interior_mask
 
+        # --- Marker Detection Heuristic ---
+        # Detect 3 high-density dots on the skin (1 anterior, 2 lateral)
+        marker_voxels = np.zeros_like(all_metal_voxels, dtype=bool)
+        marker_slices = []
+        for i in range(hu_volume.shape[0]):
+            surface_and_ext = (metal_surface[i] | metal_external[i])
+            if not np.any(surface_and_ext):
+                continue
+            labeled, num_features = ndimage.label(surface_and_ext)
+            if num_features == 0:
+                continue
+
+            comp_indices = range(1, num_features + 1)
+            comp_vols = ndimage.sum(surface_and_ext, labeled, comp_indices) * voxel_vol
+
+            # Filter for small components (potential markers)
+            marker_candidates = [idx for idx, vol in zip(comp_indices, comp_vols) if vol < 0.1]
+
+            if len(marker_candidates) == 3:
+                centroids = ndimage.center_of_mass(surface_and_ext, labeled, marker_candidates)
+                # centroids are (y, x)
+                # Sort by y (anterior is min y)
+                sorted_by_y = sorted(centroids, key=lambda c: c[0])
+                ant = sorted_by_y[0]
+                others = sorted_by_y[1:]
+                # Sort others by x to find lateral left/right
+                sorted_by_x = sorted(others, key=lambda c: c[1])
+                lat_left = sorted_by_x[0]
+                lat_right = sorted_by_x[1]
+
+                # Verify configuration: Anterior is between lateral in X,
+                # and Lateral ones are below Anterior in Y (larger Y)
+                if lat_left[1] < ant[1] < lat_right[1] and ant[0] < min(lat_left[0], lat_right[0]):
+                    # It's the 3-marker pattern!
+                    for idx in marker_candidates:
+                        marker_voxels[i] |= (labeled == idx)
+                    marker_slices.append(i + 1)
+
+        # Exclude markers from metal masks
+        metal_surface &= ~marker_voxels
+        metal_external &= ~marker_voxels
+        all_metal_voxels &= ~marker_voxels
+
         metal_internal_cc = float(np.sum(metal_internal) * voxel_vol)
         metal_surface_cc = float(np.sum(metal_surface) * voxel_vol)
         metal_external_cc = float(np.sum(metal_external) * voxel_vol)
@@ -291,6 +334,8 @@ class QAEngine:
             "pediatric_mismatch": pediatric_mismatch,
             "pediatric_mismatch_message": pediatric_mismatch_message,
             "rescale_slope": rescale_slope,
+            "marker_detected": len(marker_slices) > 0,
+            "marker_slices": marker_slices,
         }
         return metrics
 
