@@ -4,76 +4,80 @@ RapidCTQA is a specialized automated Quality Assurance (QA) tool for radiotherap
 
 ## Features
 
-- **Automated DICOM Ingestion**: Listens for incoming DICOM transfers and automatically triggers QA analysis.
-- **Agent-Based Analysis**: Multiple specialized "agents" evaluate different aspects of the CT dataset.
-- **Detailed Reporting**: Generates human-readable findings with specific slice-level locations for artifacts and errors.
-- **Interactive Dashboard**: Web interface for reviewing studies, results, and generating PDF reports.
+- **Automated DICOM Ingestion**: Integrated DICOM SCP (C-STORE) listener for seamless ingestion from PACS or CT Scanners.
+- **Multi-Agent Analysis**: A suite of specialized agents evaluates geometry, image quality, HU accuracy, and clinical protocols.
+- **Artifact & Metal Detection**: Advanced detection of truncation, excessive bowel gas, and metallic implants (internal, surface, and external).
+- **Patient Alignment**: Automated detection of patient roll using DICOM `ImageOrientationPatient` metadata.
+- **Interactive Dashboard**: Modern web interface for reviewing studies, detailed metrics, and QA flags.
+- **Automated Reporting**: Generates comprehensive PDF QA reports with slice-indexed findings.
+- **Clinical Integration**: Auto-exports accepted series to a designated "TPS Export" directory and routes them to configured DICOM destinations.
+- **Cockpit Tool**: Includes a dedicated visualization tool (`cockpit.py`) for detailed manual inspection of flagged series.
 
 ## System Architecture
 
-- **Backend**: Python (FastAPI) for the API and QA Engine.
-- **DICOM Listener**: Integrated `pynetdicom` server for seamless ingestion from PACS/CT Scanners.
-- **QA Engine**: Core logic that computes metrics and evaluates clinical rules.
-- **Frontend**: Clean, static web interface for study management and review.
+- **Backend**: Python-based FastAPI application orchestrating the QA Engine and API.
+- **DICOM Listener**: `pynetdicom`-powered service that receives and buffers incoming DICOM series.
+- **QA Engine**: Multi-threaded processing engine that performs voxel-level analysis using `numpy` and `scipy`.
+- **Frontend**: Responsive JavaScript/HTML dashboard that communicates with the backend via REST API.
+- **Reporting**: Automated PDF generation using `fpdf2`.
 
-## Installation & Setup
+## Quick Start
 
 1.  **Install Dependencies**:
     ```bash
     pip install -r requirements.txt
     ```
-2.  **Configuration**:
-    - Edit `webApp.yaml` to configure storage paths and listener ports.
-    - Adjust clinical thresholds in `ctqa.yaml`.
-3.  **Run the Application**:
+2.  **Run the Application**:
     ```bash
     python run.py
     ```
-    The API will be available at `http://localhost:8080` and the DICOM listener at port `11112`.
+    - **Web Dashboard**: `http://localhost:8080`
+    - **DICOM Listener**: `0.0.0.0:11112` (AET: `RT_QA_SCP`)
 
 ## QA Agents & Logic
 
 ### 1. GeometryGuardian (Geometry & Truncation)
-Ensures the patient anatomy is fully contained within the reconstruction Field of View (FOV) and checks for geometry integrity.
-- **Truncation Detection**: Scans the image matrix perimeter (3px buffer). If more than 5 pixels exceed -200 HU on any slice, a `TRUNCATION_ERROR` is flagged with the affected slice range.
-- **Monotonicity**: Verifies that slice positions are strictly increasing or decreasing.
-- **Spacing Variation**: Flags series where slice spacing variation exceeds 1.0mm.
-- **Gantry Tilt**: Flags gantry tilts exceeding 1.0°.
+Ensures geometric integrity and FOV coverage.
+- **Truncation**: Detects if anatomy touches the FOV edge (3px buffer, > -200 HU).
+- **Consistency**: Validates monotonic slice positions and consistent slice spacing.
+- **Tilt**: Flags gantry tilt exceeding 1.0°.
 
 ### 2. NoiseWhisperer (Image Quality)
-Analyzes background air and calibration.
-- **Background Noise**: Calculates the Standard Deviation (SD) of 20x20px regions in the four corners of the volume. Flags if SD > 15.0 HU.
-- **Air Calibration**: Estimates Air HU from the 1st percentile of voxels. Flags if outside the [-1100, -900] HU range.
+Analyzes hardware performance and calibration.
+- **Noise**: Measures Standard Deviation in 20x20px background air regions (corners).
+- **Air HU**: Estimates Air HU via 1st percentile; flags if outside [-1100, -900] HU.
 
 ### 3. FluidPhysicist (HU Accuracy)
-Validates CT number consistency using internal biological markers.
-- **Water Consistency**: Evaluates the median HU of fluid (bladder/soft tissue). Optimally 0-35 HU. Flags if > 45 HU (potential calibration error).
-- **Rescale Slope**: Ensures the DICOM Rescale Slope is non-zero.
+Validates CT number consistency using biological markers.
+- **HU Consistency**: Evaluates median HU of soft tissue and fluid (0-50 HU range).
+- **Rescale Slope**: Ensures valid DICOM rescale metadata.
 
 ### 4. CavityScout (Air & Gas Auditor)
-Detects large gas pockets (e.g., in bowel or stomach) that may impact dosimetry.
-- **Gas Volume**: Isolates voxels < -500 HU within the body mask (HU > -500).
-- **Thresholds**: Flags "Moderate gas" if > 15cc and "Excessive gas" if > 50cc, including the specific slice range.
+Detects gas pockets that may impact dose calculation.
+- **Logic**: Isolates voxels < -500 HU within the body mask.
+- **Thresholds**: Flags moderate (>15cc) or excessive (>50cc) gas.
 
 ### 5. ImplantAuditor (Metal Detection)
-Detects high-density metallic implants or devices.
-- **Metal Detection**: Identifies voxels > 2000 HU (configurable) within the body.
-- **Volume Threshold**: To avoid false positives from small metallic skin markers, a volume threshold of **0.2 cc** is applied.
-- **Reporting**: Identifies the specific slices containing metal to assist in planning and artifact correction.
+Detects and classifies metallic objects (>2000 HU).
+- **Classification**: Distinguishes between internal implants, surface markers, and external objects.
+- **Validation**: Uses morphological erosion to define an internal body buffer.
 
-### 6. AlignmentAuditor (Patient Tilt)
-Detects if the patient is rotated (roll/yaw) relative to the treatment couch.
-- **Bilateral Symmetry Method**: Identifies rigid, symmetrical bony landmarks (e.g., femoral heads, orbital sockets) by isolating structures > 250 HU.
-- **Tilt Calculation**: Computes the Center of Mass (CoM) for left and right landmarks. The tilt angle is calculated as $\theta = \tan^{-1}(\Delta Y / \Delta X)$.
-- **Threshold**: Flags a `TILT_WARNING` if rotation exceeds **3.0°**.
+### 6. AlignmentAuditor (Patient Orientation)
+Checks for patient rotation relative to the couch.
+- **Roll Detection**: Calculates roll angle from `ImageOrientationPatient` vectors.
+- **Threshold**: Flags warnings for rotation > 3.0°.
 
 ### 7. Integrity (Protocol & Resolution)
-Lead oversight for general series consistency.
-- **Pediatric Protocol Check**: Parses the DICOM `PatientAge` (VR: AS) to determine if a patient is a child (< 18Y) or adult. It validates this against "(Child)" or "(Adult)" markers in the `ProtocolName` and `StudyDescription`.
-- **Slice Resolution**:
-    - **Preferred**: Slice thickness <= 3.0mm.
-    - **Limit**: Flags as REJECT if slice thickness > 5.0mm.
-- **Series Count**: Ensures a minimum of 5 slices for a valid clinical series.
+Lead oversight for general clinical standards.
+- **Pediatric Check**: Compares parsed `PatientAge` (VR: AS) against protocol/study markers (e.g., "(Child)").
+- **Resolution**: Flags series with slice thickness > 3mm (Warning) or > 5mm (Reject).
+
+## Documentation
+For detailed information, please refer to the `docs/` directory:
+- [API Documentation](docs/API.md)
+- [Agent Technical Details](docs/AGENTS_DETAIL.md)
+- [Configuration Guide](docs/CONFIGURATION.md)
+- [Development & Testing](docs/DEVELOPMENT.md)
 
 ## License
 MIT License
