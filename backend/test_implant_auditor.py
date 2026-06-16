@@ -34,7 +34,8 @@ def test_implant_auditor_rules_refined():
         "fluid_median_hu": 15.0,
         "rescale_slope": 1.0,
         "gas_volume_cc": 0.0,
-        "max_tilt_deg": 0.0,
+        "radon_roll_deg": 0.0,
+        "radon_confidence": 1.0,
         "pediatric_mismatch": False,
         "slice_count": 10,
         "slice_thickness": 2.0
