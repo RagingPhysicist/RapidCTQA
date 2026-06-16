@@ -1,5 +1,6 @@
 import pydicom
 import numpy as np
+from skimage.transform import radon
 import scipy.ndimage as ndimage
 import yaml
 import os
@@ -16,6 +17,37 @@ class QAEngine:
         # Parallelise IO-bound DICOM reads
         with ThreadPoolExecutor() as pool:
             datasets = list(pool.map(pydicom.dcmread, dicom_files))
+
+        # --- Fallback Filtering ---
+        # Ensure we only process images with consistent dimensions (Rows/Cols)
+        # and that are actually CT Image Storage (in case files were added manually to the dir)
+        if datasets:
+            # Pivot on the first dataset
+            ref_rows = getattr(datasets[0], 'Rows', 0)
+            ref_cols = getattr(datasets[0], 'Columns', 0)
+            ref_sop = getattr(datasets[0], 'SOPClassUID', '')
+
+            valid_datasets = []
+            for ds in datasets:
+                if (getattr(ds, 'Rows', 0) == ref_rows and
+                    getattr(ds, 'Columns', 0) == ref_cols and
+                    getattr(ds, 'SOPClassUID', '') == ref_sop and
+                    'LOCALIZER' not in [str(t).upper() for t in getattr(ds, 'ImageType', [])]):
+                    valid_datasets.append(ds)
+
+            datasets = valid_datasets
+
+        if not datasets:
+            # Handle empty case (e.g. if all files were filtered out)
+            return QAResult(
+                series_uid="Filtered",
+                patient_name="N/A",
+                protocol="N/A",
+                status="REJECT",
+                metrics={},
+                flags=[QAFlag(name="Integrity", status="REJECT", message="No valid CT image slices found in series.")]
+            )
+
         series_uid = datasets[0].SeriesInstanceUID
         patient_name = str(getattr(datasets[0], 'PatientName', 'Unknown'))
         protocol = str(getattr(datasets[0], 'ProtocolName', 'Unknown'))
@@ -218,37 +250,38 @@ class QAEngine:
                 if np.any(metal_external[i]):
                     metal_external_slices.append(i + 1)
 
-        # --- Agent: AlignmentAuditor ---
-        # Use ImageOrientationPatient (IOP) to detect patient roll.
-        # IOP is recorded by the scanner at acquisition time and directly encodes
-        # how the patient is oriented in scanner coordinates — no image processing needed.
-        #
-        # For a perfectly aligned supine patient:
-        #   row cosines = [1, 0, 0]  (image columns run along scanner X)
-        #   col cosines = [0, 1, 0]  (image rows run along scanner Y)
-        #
-        # Patient roll rotates the row vector away from [1, 0, 0].
-        # We compute roll as the per-slice deviation of IOP[0:3] from the ideal.
-        # If IOP varies across slices, we report the worst-case value.
+        # --- Agent: AlignmentAuditor (Bilateral Reflection Symmetry) ---
         align_cfg = self.config.get("thresholds", {}).get("alignment", {})
-        tilt_limit = align_cfg.get("max_allowable_tilt_deg", 3.0)
+        hu_floor = align_cfg.get("hu_floor", -300)
+        angular_step = align_cfg.get("angular_step_deg", 0.1)
 
-        iop_rolls = []
-        tilted_slices = []
+        # Analyze central slice for symmetry
+        mid_idx = len(datasets) // 2
+        mid_slice = hu_volume[mid_idx]
 
-        for i, ds in enumerate(datasets):
-            iop = getattr(ds, 'ImageOrientationPatient', None)
-            if iop is None:
-                continue
-            iop = [float(v) for v in iop]
-            row_x, row_y = iop[0], iop[1]
-            # Roll in degrees: deviation of the row vector's XY projection from ideal [1, 0]
-            roll_deg = float(np.degrees(np.arctan2(row_y, row_x)))
-            iop_rolls.append(roll_deg)
-            if abs(roll_deg) > tilt_limit:
-                tilted_slices.append(i + 1)
+        # 1. Apply HU floor
+        clean_slice = np.copy(mid_slice)
+        clean_slice[clean_slice < hu_floor] = hu_floor
 
-        max_tilt = float(np.max(np.abs(iop_rolls))) if iop_rolls else 0.0
+        # 2. Radon projection sweep (80° to 100°)
+        search_angles = np.arange(80.0, 100.0, angular_step)
+        sinogram = radon(clean_slice, theta=search_angles, preserve_range=True)
+
+        # 3. Find symmetry peak
+        best_angle_offset = 0.0
+        max_symmetry_score = -1.0
+
+        for i, angle in enumerate(search_angles):
+            profile = sinogram[:, i]
+            mirrored = np.flip(profile)
+            # Use correlation coefficient for symmetry score
+            if np.std(profile) > 0 and np.std(mirrored) > 0:
+                score = float(np.corrcoef(profile, mirrored)[0, 1])
+                if score > max_symmetry_score:
+                    max_symmetry_score = score
+                    best_angle_offset = angle - 90.0
+
+        radon_roll = -best_angle_offset # Invert to standard
 
         # --- Pediatric Protocol Check ---
         # Both StudyDescription and ProtocolName contain "(Child)" or "(Adult)".
@@ -329,8 +362,8 @@ class QAEngine:
             "metal_surface_slices": metal_surface_slices,
             "metal_external_slices": metal_external_slices,
             "truncated_slices": truncated_slices,
-            "max_tilt_deg": max_tilt,
-            "tilted_slices": tilted_slices,
+            "radon_roll_deg": radon_roll,
+            "radon_confidence": max_symmetry_score,
             "pediatric_mismatch": pediatric_mismatch,
             "pediatric_mismatch_message": pediatric_mismatch_message,
             "rescale_slope": rescale_slope,
@@ -433,10 +466,9 @@ class QAEngine:
             flags.append(QAFlag(name="ImplantAuditor", status="CONDITIONAL", message=f"EXTERNAL_METAL: High-density metal detected outside body ({metrics['metal_external_cc']:.2f} cc){slice_info}. Verify no external objects are present."))
 
         # --- AlignmentAuditor Responsibilities ---
-        align_limit = self.config.get("thresholds", {}).get("alignment", {}).get("max_allowable_tilt_deg", 3.0)
-        if metrics["max_tilt_deg"] > align_limit:
-            slice_info = self._format_slices(metrics.get("tilted_slices", []))
-            flags.append(QAFlag(name="AlignmentAuditor", status="CONDITIONAL", message=f"TILT_WARNING: Patient rotation detected ({metrics['max_tilt_deg']:.1f}°){slice_info}"))
+        align_limit = self.config.get("thresholds", {}).get("alignment", {}).get("max_allowable_tilt_deg", 1.5)
+        if abs(metrics["radon_roll_deg"]) > align_limit and metrics["radon_confidence"] > 0.95:
+            flags.append(QAFlag(name="AlignmentAuditor", status="CONDITIONAL", message=f"ROLL_ALERT: Patient rotation detected ({metrics['radon_roll_deg']:.2f}°, Confidence: {metrics['radon_confidence']:.2%})"))
 
         # --- Integrity (Shared/Lead Oversight) ---
         if metrics["pediatric_mismatch"]:
