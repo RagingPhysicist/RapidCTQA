@@ -16,6 +16,37 @@ class QAEngine:
         # Parallelise IO-bound DICOM reads
         with ThreadPoolExecutor() as pool:
             datasets = list(pool.map(pydicom.dcmread, dicom_files))
+
+        # --- Fallback Filtering ---
+        # Ensure we only process images with consistent dimensions (Rows/Cols)
+        # and that are actually CT Image Storage (in case files were added manually to the dir)
+        if datasets:
+            # Pivot on the first dataset
+            ref_rows = getattr(datasets[0], 'Rows', 0)
+            ref_cols = getattr(datasets[0], 'Columns', 0)
+            ref_sop = getattr(datasets[0], 'SOPClassUID', '')
+
+            valid_datasets = []
+            for ds in datasets:
+                if (getattr(ds, 'Rows', 0) == ref_rows and
+                    getattr(ds, 'Columns', 0) == ref_cols and
+                    getattr(ds, 'SOPClassUID', '') == ref_sop and
+                    'LOCALIZER' not in [str(t).upper() for t in getattr(ds, 'ImageType', [])]):
+                    valid_datasets.append(ds)
+
+            datasets = valid_datasets
+
+        if not datasets:
+            # Handle empty case (e.g. if all files were filtered out)
+            return QAResult(
+                series_uid="Filtered",
+                patient_name="N/A",
+                protocol="N/A",
+                status="REJECT",
+                metrics={},
+                flags=[QAFlag(name="Integrity", status="REJECT", message="No valid CT image slices found in series.")]
+            )
+
         series_uid = datasets[0].SeriesInstanceUID
         patient_name = str(getattr(datasets[0], 'PatientName', 'Unknown'))
         protocol = str(getattr(datasets[0], 'ProtocolName', 'Unknown'))
