@@ -13,6 +13,57 @@ class QAEngine:
         with open(config_path, 'r') as f:
             self.config = yaml.safe_load(f)
 
+    def _determine_true_patient_roll(self, pixel_array, hu_threshold=-300, angular_resolution=0.1):
+        """
+        Quantifies precise patient roll by locating the true axis of reflection symmetry.
+        Bypasses structural inertia limitations and segmentation noise.
+        """
+        try:
+            from skimage.transform import radon
+        except ImportError:
+            return {"status": "SKIPPED", "angle": 0.0, "confidence": 0.0, "message": "scikit-image not installed"}
+
+        # 1. Clean background noise to isolate the structural mass
+        clean_array = np.copy(pixel_array)
+        clean_array[clean_array < hu_threshold] = hu_threshold
+
+        # 2. Compute Radon projections around the vertical axis (90 degrees)
+        # We sample a fine-grained sweep around 90° (e.g., 80.0° to 100.0°)
+        search_angles = np.arange(80.0, 100.0, angular_resolution)
+        sinogram = radon(clean_array, theta=search_angles, preserve_range=True)
+
+        # 3. Find the angle where the projection is most perfectly symmetric
+        best_angle_offset = 0.0
+        max_symmetry_score = -1.0
+
+        for i, angle in enumerate(search_angles):
+            profile = sinogram[:, i]
+
+            # Mirror the 1D profile to check for bilateral reflection symmetry
+            mirrored_profile = np.flip(profile)
+
+            # Calculate normalized cross-correlation between the profile and its mirror
+            if np.std(profile) > 1e-6:
+                correlation = float(np.corrcoef(profile, mirrored_profile)[0, 1])
+
+                if correlation > max_symmetry_score:
+                    max_symmetry_score = correlation
+                    # The deviation from the true perpendicular axis (90.0°) is our roll
+                    best_angle_offset = angle - 90.0
+
+        # 4. Filter out unreadable slices (e.g., extreme noise fields)
+        if max_symmetry_score < 0.90:
+            return {"status": "SKIPPED", "angle": 0.0, "confidence": max_symmetry_score}
+
+        status = "PASS" if abs(best_angle_offset) <= 1.5 else "FAIL_ROLL_DETECTED"
+
+        return {
+            "status": status,
+            "angle": round(-best_angle_offset, 2),  # Invert to match standard couch rotation directions
+            "confidence": round(max_symmetry_score, 4),
+            "metrics": f"Calculated Roll: {round(-best_angle_offset, 2)}° (Profile Similarity: {round(max_symmetry_score * 100, 2)}%)"
+        }
+
     def analyze_series(self, dicom_files: List[str]) -> QAResult:
         # Parallelise IO-bound DICOM reads
         with ThreadPoolExecutor() as pool:
@@ -257,6 +308,11 @@ class QAEngine:
 
         # Analyze central slice for symmetry
         mid_idx = len(datasets) // 2
+        roll_info = self._determine_true_patient_roll(
+            hu_volume[mid_idx],
+            hu_threshold=hu_floor,
+            angular_resolution=angular_step
+        )
         mid_slice = hu_volume[mid_idx]
 
         # 1. Apply HU floor
@@ -362,6 +418,9 @@ class QAEngine:
             "metal_surface_slices": metal_surface_slices,
             "metal_external_slices": metal_external_slices,
             "truncated_slices": truncated_slices,
+            "radon_roll_deg": roll_info["angle"],
+            "radon_confidence": roll_info["confidence"],
+            "radon_status": roll_info["status"],
             "radon_roll_deg": radon_roll,
             "radon_confidence": max_symmetry_score,
             "pediatric_mismatch": pediatric_mismatch,
@@ -467,6 +526,10 @@ class QAEngine:
 
         # --- AlignmentAuditor Responsibilities ---
         align_limit = self.config.get("thresholds", {}).get("alignment", {}).get("max_allowable_tilt_deg", 1.5)
+        # Trigger ROLL_ALERT if deviation > limit AND confidence > 0.95
+        if metrics.get("radon_status") != "SKIPPED":
+            if abs(metrics["radon_roll_deg"]) > align_limit and metrics["radon_confidence"] > 0.95:
+                flags.append(QAFlag(name="AlignmentAuditor", status="CONDITIONAL", message=f"ROLL_ALERT: Patient rotation detected ({metrics['radon_roll_deg']:.2f}°, Confidence: {metrics['radon_confidence']:.2%})"))
         if abs(metrics["radon_roll_deg"]) > align_limit and metrics["radon_confidence"] > 0.95:
             flags.append(QAFlag(name="AlignmentAuditor", status="CONDITIONAL", message=f"ROLL_ALERT: Patient rotation detected ({metrics['radon_roll_deg']:.2f}°, Confidence: {metrics['radon_confidence']:.2%})"))
 
