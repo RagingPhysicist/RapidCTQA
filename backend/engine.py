@@ -1,5 +1,6 @@
 import pydicom
 import numpy as np
+from skimage.transform import radon
 import scipy.ndimage as ndimage
 import yaml
 import os
@@ -312,6 +313,31 @@ class QAEngine:
             hu_threshold=hu_floor,
             angular_resolution=angular_step
         )
+        mid_slice = hu_volume[mid_idx]
+
+        # 1. Apply HU floor
+        clean_slice = np.copy(mid_slice)
+        clean_slice[clean_slice < hu_floor] = hu_floor
+
+        # 2. Radon projection sweep (80° to 100°)
+        search_angles = np.arange(80.0, 100.0, angular_step)
+        sinogram = radon(clean_slice, theta=search_angles, preserve_range=True)
+
+        # 3. Find symmetry peak
+        best_angle_offset = 0.0
+        max_symmetry_score = -1.0
+
+        for i, angle in enumerate(search_angles):
+            profile = sinogram[:, i]
+            mirrored = np.flip(profile)
+            # Use correlation coefficient for symmetry score
+            if np.std(profile) > 0 and np.std(mirrored) > 0:
+                score = float(np.corrcoef(profile, mirrored)[0, 1])
+                if score > max_symmetry_score:
+                    max_symmetry_score = score
+                    best_angle_offset = angle - 90.0
+
+        radon_roll = -best_angle_offset # Invert to standard
 
         # --- Pediatric Protocol Check ---
         # Both StudyDescription and ProtocolName contain "(Child)" or "(Adult)".
@@ -395,6 +421,8 @@ class QAEngine:
             "radon_roll_deg": roll_info["angle"],
             "radon_confidence": roll_info["confidence"],
             "radon_status": roll_info["status"],
+            "radon_roll_deg": radon_roll,
+            "radon_confidence": max_symmetry_score,
             "pediatric_mismatch": pediatric_mismatch,
             "pediatric_mismatch_message": pediatric_mismatch_message,
             "rescale_slope": rescale_slope,
@@ -502,6 +530,8 @@ class QAEngine:
         if metrics.get("radon_status") != "SKIPPED":
             if abs(metrics["radon_roll_deg"]) > align_limit and metrics["radon_confidence"] > 0.95:
                 flags.append(QAFlag(name="AlignmentAuditor", status="CONDITIONAL", message=f"ROLL_ALERT: Patient rotation detected ({metrics['radon_roll_deg']:.2f}°, Confidence: {metrics['radon_confidence']:.2%})"))
+        if abs(metrics["radon_roll_deg"]) > align_limit and metrics["radon_confidence"] > 0.95:
+            flags.append(QAFlag(name="AlignmentAuditor", status="CONDITIONAL", message=f"ROLL_ALERT: Patient rotation detected ({metrics['radon_roll_deg']:.2f}°, Confidence: {metrics['radon_confidence']:.2%})"))
 
         # --- Integrity (Shared/Lead Oversight) ---
         if metrics["pediatric_mismatch"]:
