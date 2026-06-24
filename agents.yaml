@@ -56,17 +56,18 @@ agents:
     logic: "Isolate voxels > metal_threshold_hu inside body mask. Trigger a conditional warning if total volume exceeds min_metal_volume_cc."
 
   - name: "AlignmentAuditor"
-    role: "Patient Orientation & Tilt Inspector"
-    description: "Detects if the patient is rotated (roll/yaw) relative to the treatment couch."
+    role: "Bilateral Reflection Symmetry Auditor"
+    description: "Evaluates exact patient setup roll using Radon transform projection profiling around the 90-degree vertical axis to eliminate geometric and anatomical false positives."
     parameters:
-      bone_threshold_hu: 250
-      max_allowable_tilt_deg: 3.0
+      hu_floor: -300
+      angular_step_deg: 0.1
+      max_roll_tolerance_deg: 1.5
     logic: |
-      1. Isolate high-density bone structures (>250 HU).
-      2. Identify prominent left/right bilateral landmark pairs (e.g., femoral heads or orbital sockets).
-      3. Compute the Center of Mass for the Left (X1, Y1) and Right (X2, Y2) landmarks.
-      4. Calculate tilt angle: theta = arctan((Y2 - Y1) / (X2 - X1)) * (180 / pi).
-      5. If absolute(theta) > max_allowable_tilt_deg, trigger 'TILT_WARNING'.
+      1. Apply an HU floor mask at -300 to clear air artifacts.
+      2. Generate a Radon sinogram sweep from 80 to 100 degrees around the vertical reflection plane.
+      3. Compute the mirror cross-correlation coefficient for each angular slice profile.
+      4. Locate the absolute peak correlation value. The deviation from 90.0 degrees represents the true patient roll.
+      5. Trigger 'ROLL_ALERT' if the absolute deviation exceeds max_roll_tolerance_deg with a profile confidence score > 0.95.
 
 
 - name: "ReviewerAgent"
