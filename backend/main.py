@@ -224,6 +224,14 @@ async def get_studies(background_tasks: BackgroundTasks):
             status=status,
             instance_count=len(files)
         ))
+    status_priority = {
+        "REJECT": 0,
+        "CONDITIONAL": 1,
+        "ACCEPT": 2,
+        "PASS": 2,
+        "PENDING": 3
+    }
+    summaries.sort(key=lambda s: status_priority.get(s.status.upper(), 99))
     return summaries
 
 @app.get("/api/studies/{series_uid}", response_model=QAResult)

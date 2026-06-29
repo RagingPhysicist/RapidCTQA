@@ -135,11 +135,23 @@ class QAEngine:
         duplicate_slices = len(set(z_positions)) != len(z_positions)
         
         # --- Agent: GeometryGuardian ---
+        # Identify if this is a head/neck scan to ignore posterior table truncation
+        study_desc = str(getattr(datasets[0], 'StudyDescription', '')).lower()
+        protocol = str(getattr(datasets[0], 'ProtocolName', '')).lower()
+        body_part = str(getattr(datasets[0], 'BodyPartExamined', '')).lower()
+        
+        is_head_scan = any(term in study_desc or term in protocol or term in body_part 
+                           for term in ['head', 'neck', 'brain', 'c-spine', 'cspine', 'cervical'])
+
         # Logic: Scan image matrix perimeter. If count(edge_buffer > skin_threshold) >= 5 on any slice, trigger TRUNCATION_ERROR.
         edge_buffer_px = 3
         skin_threshold = -200
         perimeter_mask = np.ones_like(hu_volume[0], dtype=bool)
         perimeter_mask[edge_buffer_px:-edge_buffer_px, edge_buffer_px:-edge_buffer_px] = False
+        
+        if is_head_scan:
+            # Mask out the posterior (bottom) edge to ignore the patient table
+            perimeter_mask[-edge_buffer_px:, :] = False
         
         # Check if any slice has non-air pixels touching the perimeter
         truncation_error = False
