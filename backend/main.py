@@ -3,6 +3,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 import os
+import json
 from datetime import datetime, timedelta
 import glob
 import pydicom
@@ -149,6 +150,15 @@ def on_series_received(series_uid: str):
             results_cache[series_uid] = result
         print(f"Analysis complete for {series_uid}: {result.status}")
         
+        # Save to disk
+        cache_file = os.path.join(study_path, "qa_result.json")
+        try:
+            with open(cache_file, "w") as f:
+                f.write(result.json())
+            print(f"Cached result saved to disk: {cache_file}")
+        except Exception as e:
+            print(f"Error saving cached result to disk: {e}")
+        
         # Generate PDF report automatically in reports folder
         pdf_path = os.path.join(REPORTS_DIR, f"QA_Report_{series_uid}.pdf")
         try:
@@ -173,8 +183,27 @@ def _submit_series(series_uid: str):
 
 listener = DicomListener(STORAGE_DIR, _submit_series)
 
+def _load_persisted_results():
+    """Load previously saved QA results from disk to results_cache."""
+    print("Loading persisted QA results from disk...")
+    for entry in os.listdir(STORAGE_DIR):
+        study_path = os.path.join(STORAGE_DIR, entry)
+        if not os.path.isdir(study_path):
+            continue
+        cache_file = os.path.join(study_path, "qa_result.json")
+        if os.path.exists(cache_file):
+            try:
+                with open(cache_file, "r") as f:
+                    data = json.load(f)
+                with results_cache_lock:
+                    results_cache[entry] = QAResult(**data)
+                print(f"Loaded cached result for {entry}")
+            except Exception as e:
+                print(f"Error loading cached result for {entry}: {e}")
+
 @app.on_event("startup")
 async def startup_event():
+    _load_persisted_results()
     dl_config = config_web.get("backend", {}).get("dicom_listener", {})
     host = dl_config.get("host", "0.0.0.0")
     port = dl_config.get("port", 11112)
@@ -208,7 +237,9 @@ async def get_studies(background_tasks: BackgroundTasks):
         study_date = str(getattr(ds, 'StudyDate', 'Unknown'))
         
         status = "PENDING"
-        if series_uid in results_cache:
+        if listener.is_ingesting(series_uid):
+            status = "INGESTING"
+        elif series_uid in results_cache:
             status = results_cache[series_uid].status
         else:
             # Trigger analysis in background if not already cached
@@ -229,7 +260,8 @@ async def get_studies(background_tasks: BackgroundTasks):
         "CONDITIONAL": 1,
         "ACCEPT": 2,
         "PASS": 2,
-        "PENDING": 3
+        "PENDING": 3,
+        "INGESTING": 4
     }
     summaries.sort(key=lambda s: status_priority.get(s.status.upper(), 99))
     return summaries

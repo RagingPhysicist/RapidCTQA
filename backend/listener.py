@@ -94,3 +94,7 @@ class DicomListener:
             self.timers.pop(series_uid, None)
         print(f"Series {series_uid} stable ({count} files, no new data for {self.STABILITY_SECONDS}s). Triggering analysis...")
         self.callback(series_uid)
+
+    def is_ingesting(self, series_uid: str) -> bool:
+        with self._lock:
+            return series_uid in self.series_tracker

@@ -123,6 +123,7 @@ td {
 .badge-conditional { background: rgba(245, 158, 11, 0.2); color: var(--warning); }
 .badge-reject { background: rgba(239, 68, 68, 0.2); color: var(--error); }
 .badge-pending { background: var(--glass); color: var(--text-muted); }
+.badge-ingesting { background: rgba(0, 210, 255, 0.2); color: var(--primary); }
 
 .view-btn {
   background: var(--glass);

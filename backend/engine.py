@@ -65,7 +65,7 @@ class QAEngine:
 
     def analyze_series(self, dicom_files: List[str]) -> QAResult:
         # Parallelise IO-bound DICOM reads
-        with ThreadPoolExecutor() as pool:
+        with ThreadPoolExecutor(max_workers=4) as pool:
             datasets = list(pool.map(pydicom.dcmread, dicom_files))
 
         # --- Fallback Filtering ---
@@ -239,7 +239,7 @@ class QAEngine:
                 interior_mask[i] = filled
                 shrunk_mask[i] = ndimage.binary_erosion(filled, iterations=erosion_px)
 
-        with ThreadPoolExecutor() as pool:
+        with ThreadPoolExecutor(max_workers=2) as pool:
             list(pool.map(_process_slice, range(hu_volume.shape[0])))
 
         metal_internal = all_metal_voxels & shrunk_mask
