@@ -52,6 +52,18 @@ pytest backend/
 - `backend/test_dicom_sender.py`: Tests for DICOM networking/egress.
 - `backend/test_refined_pca.py`: Tests for advanced geometry/alignment logic.
 
+## Concurrency & Resource Optimization
+The application enforces strict limits on concurrency to prevent host CPU and RAM exhaustion:
+- **API Worker Pool**: Defined in `backend/main.py` using `ThreadPoolExecutor(max_workers=4)` to throttle the concurrent analysis of different series.
+- **DICOM I/O Pool**: Reading files parallelizes via `ThreadPoolExecutor(max_workers=4)` inside the engine to optimize sequential disk reads without queue thrashing.
+- **CPU Slice Processing**: Python threads are bound by the Global Interpreter Lock (GIL). Running too many concurrent threads for heavy math operations like morphological erosion degrades performance. Slice processing inside the engine uses `ThreadPoolExecutor(max_workers=2)` to prevent context-shifting overhead.
+
+## QA Results Cache & Disk Persistence
+To prevent duplicate analysis on application restarts:
+- Completed `QAResult` objects are written to disk as `qa_result.json` directly within the series storage directory (`STORAGE_DIR/{series_uid}/qa_result.json`).
+- Upon starting up, the API loads all existing `qa_result.json` files from `STORAGE_DIR` into `results_cache` in memory.
+- Scans that have already been evaluated skip re-analysis and are not re-sent to DICOM destinations.
+
 ## Contribution Guidelines
 - **Always update documentation**: If you change agent logic or API endpoints, update the corresponding files in `docs/`.
 - **Verify with Cockpit**: Use `cockpit.py` to visually verify any changes to image processing logic.

@@ -5,6 +5,7 @@ RapidCTQA uses a modular agent-based architecture to evaluate DICOM series. Each
 ## 1. GeometryGuardian
 Ensures that the physical geometry of the scan is correct and that the patient is fully captured.
 - **Truncation Detection**: Scans the outermost 3 pixels of the image matrix. If $\ge 5$ pixels on any slice exceed -200 HU, it flags a `TRUNCATION_ERROR`.
+  - *Head/Neck Scan Exception*: If DICOM tags (`StudyDescription`, `ProtocolName`, or `BodyPartExamined`) identify the scan as a Head, Brain, or Neck/C-Spine scan, the posterior (bottom) edge of the perimeter mask is ignored to prevent false positives from the patient table.
 - **Slice Spacing**: Calculates the variation in spacing between slices ($z$-axis). Variation $> 1.0$ mm triggers a rejection.
 - **Monotonicity**: Verifies that slice positions ($z$-axis) strictly increase or decrease.
 - **Gantry Tilt**: Flags gantry tilts $> 1.0^{\circ}$ as a conditional warning.
