@@ -4,10 +4,10 @@
   "description": "Network routing configuration for automated radiotherapy QA pipeline destinations",
   "dicom_destinations": [
     {
-      "ae_title": "OTP_SCU",
-      "ip_address": "192.168.132.183",
-      "port": 104,
-      "description": "MVision Autosegmentation service",
+      "ae_title": "YOUR Destination",
+      "ip_address": "127.0.0.1",
+      "port": 11112,
+      "description": "Any nice description",
       "is_active": true,
       "timeout_seconds": 30,
       "connection_type": "C-STORE"
