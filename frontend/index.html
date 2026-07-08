@@ -66,6 +66,88 @@
     </div>
   </div>
 
-  <script src="/static/app.js?v=4"></script>
+  <!-- Cockpit Viewer Modal -->
+  <div id="cockpit-overlay" class="cockpit-overlay">
+    <div class="cockpit-shell">
+
+      <!-- Header bar -->
+      <div class="cockpit-header">
+        <div class="cockpit-title">
+          <span class="cockpit-logo">⬡</span>
+          <span id="cockpit-patient-name">Loading...</span>
+          <span id="cockpit-protocol" class="cockpit-protocol-label"></span>
+        </div>
+        <div class="cockpit-header-right">
+          <span id="cockpit-slice-label" class="cockpit-slice-label">Slice 0 / 0</span>
+          <button id="cockpit-close-btn" class="cockpit-close-btn" onclick="closeCockpit()">✕ Close</button>
+        </div>
+      </div>
+
+      <!-- Main body -->
+      <div class="cockpit-body">
+
+        <!-- Image pane -->
+        <div class="cockpit-image-pane" id="cockpit-image-pane">
+          <img id="cockpit-image" class="cockpit-image" src="" alt="DICOM slice" />
+          <div id="cockpit-loading" class="cockpit-loading-overlay">
+            <div class="cockpit-spinner"></div>
+          </div>
+        </div>
+
+        <!-- Right sidebar -->
+        <aside class="cockpit-sidebar">
+
+          <!-- W/L Presets -->
+          <section class="cockpit-section">
+            <div class="cockpit-section-title">WINDOW / LEVEL</div>
+            <select id="cockpit-wl-preset" class="cockpit-select" onchange="applyCockpitPreset()">
+              <option value="">Manual</option>
+            </select>
+            <div class="cockpit-slider-row">
+              <label>Width</label>
+              <input id="cockpit-ww" type="range" min="1" max="3000" value="400" oninput="onCockpitWLChange()" />
+              <span id="cockpit-ww-val">400</span>
+            </div>
+            <div class="cockpit-slider-row">
+              <label>Level</label>
+              <input id="cockpit-wl" type="range" min="-1000" max="1000" value="40" oninput="onCockpitWLChange()" />
+              <span id="cockpit-wl-val">40</span>
+            </div>
+            <div class="cockpit-toggle-row">
+              <label for="cockpit-metal-toggle">Metal overlay</label>
+              <input id="cockpit-metal-toggle" type="checkbox" checked onchange="refreshCockpitSlice()" />
+            </div>
+          </section>
+
+          <!-- Slice nav -->
+          <section class="cockpit-section">
+            <div class="cockpit-section-title">NAVIGATION</div>
+            <input id="cockpit-nav-slider" type="range" min="0" max="0" value="0"
+                   class="cockpit-nav-slider" oninput="onCockpitNavSlider()" />
+            <p class="cockpit-hint">Scroll over image or drag slider</p>
+          </section>
+
+          <!-- QA Flags -->
+          <section class="cockpit-section cockpit-flags-section">
+            <div class="cockpit-section-title">AGENT FINDINGS</div>
+            <div id="cockpit-flags"></div>
+          </section>
+
+          <!-- Actions -->
+          <section class="cockpit-actions">
+            <button id="cockpit-approve-btn" class="cockpit-btn cockpit-btn-approve" onclick="cockpitApprove()">
+              ✓ APPROVE
+            </button>
+            <button id="cockpit-reject-btn" class="cockpit-btn cockpit-btn-reject" onclick="cockpitReject()">
+              ✕ REJECT
+            </button>
+          </section>
+
+        </aside>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/app.js?v=5"></script>
 </body>
 </html>

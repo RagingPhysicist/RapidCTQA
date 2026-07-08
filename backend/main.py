@@ -1,19 +1,21 @@
-from fastapi import FastAPI, BackgroundTasks, HTTPException
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, BackgroundTasks, HTTPException, Query
+from fastapi.responses import StreamingResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 import os
 import json
+import asyncio
 from datetime import datetime, timedelta
 import glob
 import pydicom
-import subprocess
-import sys
+import io
 import shutil
 import threading
 import yaml
 from concurrent.futures import ThreadPoolExecutor
 from typing import List, Dict
+import numpy as np
+from PIL import Image
 try:
     from .models import QAResult, StudySummary, IngestionStatus
     from .engine import QAEngine
@@ -285,15 +287,130 @@ async def run_validation(series_uid: str, background_tasks: BackgroundTasks):
     background_tasks.add_task(on_series_received, series_uid)
     return {"message": "Validation triggered"}
 
-@app.post("/api/launch_cockpit/{series_uid}")
-async def launch_cockpit(series_uid: str):
+@app.get("/api/viewer/{series_uid}/info")
+async def viewer_info(series_uid: str):
+    """Return slice count, sorted file list index, patient info and QA flags for the web viewer."""
+    study_path = os.path.join(STORAGE_DIR, series_uid)
+    dicom_files = sorted(glob.glob(os.path.join(study_path, "*.dcm")))
+    if not dicom_files:
+        raise HTTPException(status_code=404, detail="Series not found")
+
+    ds = pydicom.dcmread(dicom_files[0], stop_before_pixels=True)
+    patient_name = str(getattr(ds, 'PatientName', 'Unknown'))
+    protocol = str(getattr(ds, 'ProtocolName', 'Unknown'))
+
+    flags = []
+    if series_uid in results_cache:
+        result = results_cache[series_uid]
+        flags = [{"name": f.name, "status": f.status, "message": f.message} for f in result.flags]
+
+    # Load WL presets from WL.json
+    wl_presets = {}
+    wl_path = os.path.join(ROOT_DIR, "WL.json")
     try:
-        # Launch cockpit.py with the current python executable in the root directory
-        cockpit_path = os.path.join(ROOT_DIR, "cockpit.py")
-        subprocess.Popen([sys.executable, cockpit_path, series_uid], cwd=ROOT_DIR)
-        return {"message": f"Cockpit launched for {series_uid}"}
+        with open(wl_path) as f:
+            wl_presets = json.load(f).get("ct_window_level_presets", {})
+    except Exception:
+        pass
+
+    return {
+        "series_uid": series_uid,
+        "patient_name": patient_name,
+        "protocol": protocol,
+        "slice_count": len(dicom_files),
+        "flags": flags,
+        "wl_presets": wl_presets,
+    }
+
+
+def _render_slice_png(dcm_path: str, window_width: float, window_level: float, metal_threshold: float) -> bytes:
+    """Render a single DICOM slice as a PNG byte stream with W/L and optional metal overlay."""
+    ds = pydicom.dcmread(dcm_path)
+    img = ds.pixel_array.astype(np.float32)
+    slope = float(getattr(ds, 'RescaleSlope', 1.0))
+    intercept = float(getattr(ds, 'RescaleIntercept', 0.0))
+    img = img * slope + intercept
+
+    vmin = window_level - window_width / 2
+    vmax = window_level + window_width / 2
+    img_clipped = np.clip(img, vmin, vmax)
+    img_norm = ((img_clipped - vmin) / (vmax - vmin) * 255).astype(np.uint8)
+
+    # Convert to RGB so we can draw a coloured metal overlay
+    rgb = np.stack([img_norm, img_norm, img_norm], axis=-1)
+
+    # Metal overlay: pixels above threshold -> red tint
+    metal_mask = img > metal_threshold
+    if np.any(metal_mask):
+        rgb[metal_mask] = np.array([220, 50, 50], dtype=np.uint8)
+
+    pil_img = Image.fromarray(rgb, mode='RGB')
+    buf = io.BytesIO()
+    pil_img.save(buf, format='PNG', optimize=False)
+    buf.seek(0)
+    return buf.read()
+
+
+@app.get("/api/viewer/{series_uid}/slice/{index}")
+async def viewer_slice(
+    series_uid: str,
+    index: int,
+    ww: float = Query(default=400.0),
+    wl: float = Query(default=40.0),
+    metal: bool = Query(default=True),
+):
+    """Return a single DICOM slice as a PNG image with W/L and metal overlay applied."""
+    study_path = os.path.join(STORAGE_DIR, series_uid)
+    dicom_files = sorted(glob.glob(os.path.join(study_path, "*.dcm")))
+    if not dicom_files:
+        raise HTTPException(status_code=404, detail="Series not found")
+    if index < 0 or index >= len(dicom_files):
+        raise HTTPException(status_code=400, detail=f"Slice index out of range (0–{len(dicom_files)-1})")
+
+    metal_threshold = engine.config.get("thresholds", {}).get("implants", {}).get("metal_threshold_hu", 3000) if metal else 1e9
+
+    try:
+        png_bytes = await asyncio.get_event_loop().run_in_executor(
+            analysis_pool,
+            _render_slice_png,
+            dicom_files[index],
+            ww,
+            wl,
+            metal_threshold,
+        )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to launch cockpit: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Slice render failed: {e}")
+
+    return StreamingResponse(io.BytesIO(png_bytes), media_type="image/png")
+
+
+@app.post("/api/viewer/{series_uid}/approve")
+async def approve_series(series_uid: str):
+    """Approve a series: export to TPS and route via DICOM."""
+    study_path = os.path.join(STORAGE_DIR, series_uid)
+    if not os.path.isdir(study_path):
+        raise HTTPException(status_code=404, detail="Series not found")
+    try:
+        dest = os.path.join(EXPORT_DIR, series_uid)
+        if os.path.exists(dest):
+            shutil.rmtree(dest)
+        shutil.copytree(study_path, dest)
+        send_dicom_series(study_path)
+        return {"message": f"{series_uid} approved and routed"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Approval failed: {e}")
+
+
+@app.post("/api/viewer/{series_uid}/reject")
+async def reject_series(series_uid: str):
+    """Reject a series and log the decision."""
+    log_path = os.path.join(ROOT_DIR, "rejections.log")
+    try:
+        with open(log_path, "a") as f:
+            f.write(f"{series_uid} rejected\n")
+        return {"message": f"{series_uid} rejected"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Rejection logging failed: {e}")
 
 @app.get("/api/reports/{series_uid}/pdf")
 async def get_pdf_report(series_uid: str):

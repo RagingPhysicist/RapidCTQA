@@ -117,18 +117,205 @@ async function rerunQA(seriesUid) {
   }
 }
 
+// ── Cockpit state ────────────────────────────────────────────────
+const cockpitState = {
+  seriesUid: null,
+  sliceIndex: 0,
+  sliceCount: 0,
+  wl_presets: {},
+  loadTimer: null,
+};
+
 async function launchCockpit(seriesUid) {
+  cockpitState.seriesUid = seriesUid;
+  cockpitState.sliceIndex = 0;
+
+  const overlay = document.getElementById('cockpit-overlay');
+  overlay.classList.add('open');
+
+  // Disable buttons while loading
+  _setCockpitButtonsEnabled(false);
+
   try {
-    const response = await fetch(`${API_BASE}/launch_cockpit/${seriesUid}`, { method: 'POST' });
-    const data = await response.json();
-    if (!response.ok) {
-        alert(data.detail || 'Failed to launch cockpit');
+    const res = await fetch(`${API_BASE}/viewer/${seriesUid}/info`);
+    if (!res.ok) throw new Error(await res.text());
+    const info = await res.json();
+
+    cockpitState.sliceCount = info.slice_count;
+    cockpitState.wl_presets = info.wl_presets || {};
+    cockpitState.sliceIndex = Math.floor(info.slice_count / 2);
+
+    document.getElementById('cockpit-patient-name').textContent = info.patient_name;
+    document.getElementById('cockpit-protocol').textContent = info.protocol;
+
+    // Configure nav slider
+    const navSlider = document.getElementById('cockpit-nav-slider');
+    navSlider.min = 0;
+    navSlider.max = Math.max(0, info.slice_count - 1);
+    navSlider.value = cockpitState.sliceIndex;
+
+    // Populate W/L preset dropdown
+    const select = document.getElementById('cockpit-wl-preset');
+    select.innerHTML = '<option value="">Manual</option>';
+    for (const [name, vals] of Object.entries(cockpitState.wl_presets)) {
+      const opt = document.createElement('option');
+      opt.value = name;
+      opt.textContent = name.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+      select.appendChild(opt);
     }
-  } catch (error) {
-    console.error('Failed to launch cockpit:', error);
-    alert('Failed to launch cockpit. Is the backend running?');
+
+    // Render QA flags
+    const flagsEl = document.getElementById('cockpit-flags');
+    if (info.flags && info.flags.length > 0) {
+      const colours = { REJECT: '#ef4444', CONDITIONAL: '#f59e0b', ACCEPT: '#10b981', PASS: '#10b981' };
+      flagsEl.innerHTML = info.flags.map(f => `
+        <div class="cockpit-flag">
+          <div class="cockpit-flag-dot" style="background:${colours[f.status] || '#94a3b8'}"></div>
+          <div>
+            <div class="cockpit-flag-name">${f.name}</div>
+            <div class="cockpit-flag-msg">${f.message || ''}</div>
+          </div>
+        </div>
+      `).join('');
+    } else {
+      flagsEl.innerHTML = '<p style="font-size:0.8rem;color:var(--text-muted);">No issues detected.</p>';
+    }
+
+    _setCockpitButtonsEnabled(true);
+    refreshCockpitSlice();
+  } catch (err) {
+    console.error('Cockpit load failed:', err);
+    document.getElementById('cockpit-patient-name').textContent = 'Error loading series';
   }
 }
+
+function closeCockpit() {
+  document.getElementById('cockpit-overlay').classList.remove('open');
+  // Revoke previous blob URL to free memory
+  const img = document.getElementById('cockpit-image');
+  if (img.src && img.src.startsWith('blob:')) URL.revokeObjectURL(img.src);
+  img.src = '';
+  cockpitState.seriesUid = null;
+}
+
+function refreshCockpitSlice() {
+  const { seriesUid, sliceIndex } = cockpitState;
+  if (!seriesUid) return;
+
+  const ww = document.getElementById('cockpit-ww').value;
+  const wl = document.getElementById('cockpit-wl').value;
+  const metal = document.getElementById('cockpit-metal-toggle').checked;
+
+  // Update slice label
+  document.getElementById('cockpit-slice-label').textContent =
+    `Slice ${sliceIndex + 1} / ${cockpitState.sliceCount}`;
+
+  // Sync nav slider
+  document.getElementById('cockpit-nav-slider').value = sliceIndex;
+
+  const url = `${API_BASE}/viewer/${seriesUid}/slice/${sliceIndex}?ww=${ww}&wl=${wl}&metal=${metal}`;
+  const loading = document.getElementById('cockpit-loading');
+  loading.classList.add('visible');
+
+  const img = document.getElementById('cockpit-image');
+  // Use a temporary Image to avoid flicker
+  const tmp = new window.Image();
+  tmp.onload = () => {
+    if (img.src && img.src.startsWith('blob:')) URL.revokeObjectURL(img.src);
+    img.src = tmp.src;
+    loading.classList.remove('visible');
+  };
+  tmp.onerror = () => loading.classList.remove('visible');
+  tmp.src = url;
+}
+
+function onCockpitNavSlider() {
+  cockpitState.sliceIndex = parseInt(document.getElementById('cockpit-nav-slider').value, 10);
+  refreshCockpitSlice();
+}
+
+function onCockpitWLChange() {
+  document.getElementById('cockpit-wl-preset').value = '';
+  document.getElementById('cockpit-ww-val').textContent = document.getElementById('cockpit-ww').value;
+  document.getElementById('cockpit-wl-val').textContent = document.getElementById('cockpit-wl').value;
+  _debouncedRefresh();
+}
+
+function applyCockpitPreset() {
+  const name = document.getElementById('cockpit-wl-preset').value;
+  if (!name || !cockpitState.wl_presets[name]) return;
+  const { window_width, window_level } = cockpitState.wl_presets[name];
+  document.getElementById('cockpit-ww').value = window_width;
+  document.getElementById('cockpit-wl').value = window_level;
+  document.getElementById('cockpit-ww-val').textContent = window_width;
+  document.getElementById('cockpit-wl-val').textContent = window_level;
+  refreshCockpitSlice();
+}
+
+function _debouncedRefresh() {
+  clearTimeout(cockpitState.loadTimer);
+  cockpitState.loadTimer = setTimeout(refreshCockpitSlice, 120);
+}
+
+function _setCockpitButtonsEnabled(enabled) {
+  ['cockpit-approve-btn', 'cockpit-reject-btn'].forEach(id => {
+    document.getElementById(id).disabled = !enabled;
+  });
+}
+
+async function cockpitApprove() {
+  const { seriesUid } = cockpitState;
+  if (!seriesUid) return;
+  _setCockpitButtonsEnabled(false);
+  try {
+    const res = await fetch(`${API_BASE}/viewer/${seriesUid}/approve`, { method: 'POST' });
+    const data = await res.json();
+    if (res.ok) {
+      closeCockpit();
+      fetchStudies();
+    } else {
+      alert(data.detail || 'Approval failed');
+      _setCockpitButtonsEnabled(true);
+    }
+  } catch (err) {
+    alert('Approval request failed');
+    _setCockpitButtonsEnabled(true);
+  }
+}
+
+async function cockpitReject() {
+  const { seriesUid } = cockpitState;
+  if (!seriesUid) return;
+  _setCockpitButtonsEnabled(false);
+  try {
+    const res = await fetch(`${API_BASE}/viewer/${seriesUid}/reject`, { method: 'POST' });
+    const data = await res.json();
+    if (res.ok) {
+      closeCockpit();
+      fetchStudies();
+    } else {
+      alert(data.detail || 'Rejection failed');
+      _setCockpitButtonsEnabled(true);
+    }
+  } catch (err) {
+    alert('Rejection request failed');
+    _setCockpitButtonsEnabled(true);
+  }
+}
+
+// Mouse-wheel scroll on the image pane
+document.addEventListener('DOMContentLoaded', () => {
+  document.getElementById('cockpit-image-pane').addEventListener('wheel', e => {
+    e.preventDefault();
+    if (!cockpitState.seriesUid) return;
+    if (e.deltaY > 0) {
+      cockpitState.sliceIndex = Math.min(cockpitState.sliceCount - 1, cockpitState.sliceIndex + 1);
+    } else {
+      cockpitState.sliceIndex = Math.max(0, cockpitState.sliceIndex - 1);
+    }
+    refreshCockpitSlice();
+  }, { passive: false });
+});
 
 function closeModal() {
   document.getElementById('modal').style.display = 'none';
