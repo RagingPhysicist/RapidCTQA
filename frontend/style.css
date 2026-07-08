@@ -462,6 +462,58 @@ td {
   color: var(--text-muted);
 }
 
+/* Zoom controls */
+.cockpit-zoom-row {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-bottom: 0.5rem;
+}
+
+.cockpit-zoom-btn {
+  width: 28px;
+  height: 28px;
+  border-radius: 0.4rem;
+  border: 1px solid var(--border);
+  background: var(--glass);
+  color: var(--text-main);
+  font-size: 1.1rem;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+  flex-shrink: 0;
+}
+
+.cockpit-zoom-btn:hover {
+  background: var(--primary);
+  border-color: var(--primary);
+  color: #000;
+}
+
+.cockpit-zoom-label {
+  flex: 1;
+  text-align: center;
+  font-size: 0.8rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-main);
+}
+
+.cockpit-zoom-reset {
+  padding: 0.2rem 0.5rem;
+  border-radius: 0.4rem;
+  border: 1px solid var(--border);
+  background: var(--glass);
+  color: var(--text-muted);
+  font-size: 0.7rem;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.cockpit-zoom-reset:hover {
+  background: var(--border);
+  color: var(--text-main);
+}
+
 /* Flags panel */
 .cockpit-flags-section {
   flex: 1;

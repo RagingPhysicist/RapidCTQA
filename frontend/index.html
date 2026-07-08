@@ -127,6 +127,18 @@
             <p class="cockpit-hint">Scroll over image or drag slider</p>
           </section>
 
+          <!-- Zoom -->
+          <section class="cockpit-section">
+            <div class="cockpit-section-title">ZOOM</div>
+            <div class="cockpit-zoom-row">
+              <button class="cockpit-zoom-btn" onclick="zoomCockpit(-0.25)" title="Zoom out">−</button>
+              <span id="cockpit-zoom-label" class="cockpit-zoom-label">100%</span>
+              <button class="cockpit-zoom-btn" onclick="zoomCockpit(+0.25)" title="Zoom in">+</button>
+              <button class="cockpit-zoom-reset" onclick="resetCockpitZoom()" title="Reset zoom">Reset</button>
+            </div>
+            <p class="cockpit-hint">Ctrl + scroll to zoom</p>
+          </section>
+
           <!-- QA Flags -->
           <section class="cockpit-section cockpit-flags-section">
             <div class="cockpit-section-title">AGENT FINDINGS</div>
@@ -148,6 +160,6 @@
     </div>
   </div>
 
-  <script src="/static/app.js?v=5"></script>
+  <script src="/static/app.js?v=6"></script>
 </body>
 </html>

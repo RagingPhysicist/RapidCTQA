@@ -124,11 +124,14 @@ const cockpitState = {
   sliceCount: 0,
   wl_presets: {},
   loadTimer: null,
+  zoom: 1.0,
 };
 
 async function launchCockpit(seriesUid) {
   cockpitState.seriesUid = seriesUid;
   cockpitState.sliceIndex = 0;
+  cockpitState.zoom = 1.0;
+  _applyCockpitZoom();
 
   const overlay = document.getElementById('cockpit-overlay');
   overlay.classList.add('open');
@@ -191,11 +194,12 @@ async function launchCockpit(seriesUid) {
 
 function closeCockpit() {
   document.getElementById('cockpit-overlay').classList.remove('open');
-  // Revoke previous blob URL to free memory
   const img = document.getElementById('cockpit-image');
   if (img.src && img.src.startsWith('blob:')) URL.revokeObjectURL(img.src);
   img.src = '';
+  img.style.transform = 'scale(1)';
   cockpitState.seriesUid = null;
+  cockpitState.zoom = 1.0;
 }
 
 function refreshCockpitSlice() {
@@ -303,17 +307,39 @@ async function cockpitReject() {
   }
 }
 
-// Mouse-wheel scroll on the image pane
+// ── Zoom ─────────────────────────────────────────────────────────
+function zoomCockpit(delta) {
+  cockpitState.zoom = Math.min(4.0, Math.max(0.25, cockpitState.zoom + delta));
+  _applyCockpitZoom();
+}
+
+function resetCockpitZoom() {
+  cockpitState.zoom = 1.0;
+  _applyCockpitZoom();
+}
+
+function _applyCockpitZoom() {
+  const img = document.getElementById('cockpit-image');
+  img.style.transform = `scale(${cockpitState.zoom})`;
+  img.style.transformOrigin = 'center center';
+  document.getElementById('cockpit-zoom-label').textContent = `${Math.round(cockpitState.zoom * 100)}%`;
+}
+
+// Mouse-wheel: Ctrl+scroll = zoom, plain scroll = slice nav
 document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('cockpit-image-pane').addEventListener('wheel', e => {
     e.preventDefault();
     if (!cockpitState.seriesUid) return;
-    if (e.deltaY > 0) {
-      cockpitState.sliceIndex = Math.min(cockpitState.sliceCount - 1, cockpitState.sliceIndex + 1);
+    if (e.ctrlKey || e.metaKey) {
+      zoomCockpit(e.deltaY < 0 ? 0.1 : -0.1);
     } else {
-      cockpitState.sliceIndex = Math.max(0, cockpitState.sliceIndex - 1);
+      if (e.deltaY > 0) {
+        cockpitState.sliceIndex = Math.min(cockpitState.sliceCount - 1, cockpitState.sliceIndex + 1);
+      } else {
+        cockpitState.sliceIndex = Math.max(0, cockpitState.sliceIndex - 1);
+      }
+      refreshCockpitSlice();
     }
-    refreshCockpitSlice();
   }, { passive: false });
 });
 
