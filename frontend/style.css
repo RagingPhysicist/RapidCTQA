@@ -43,12 +43,28 @@ header {
   border-bottom: 1px solid var(--border);
 }
 
+.logo-container {
+  display: flex;
+  align-items: baseline;
+  gap: 0.75rem;
+}
+
 .logo {
   font-size: 1.5rem;
   font-weight: 800;
   background: linear-gradient(to right, var(--primary), var(--secondary));
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
+}
+
+.version-tag {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  background: var(--glass);
+  padding: 0.15rem 0.5rem;
+  border-radius: 4px;
+  border: 1px solid var(--border);
 }
 
 .status-grid {

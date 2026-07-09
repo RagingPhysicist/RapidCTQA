@@ -1,4 +1,4 @@
-version: "1.0"
+version: "1.1"
 metadata:
   purpose: "Rapid Radiotherapy CT QA"
   system_threshold_unit: "Hounsfield Units (HU)"

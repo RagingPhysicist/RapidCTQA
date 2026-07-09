@@ -12,7 +12,10 @@
 <body>
   <div class="container">
     <header>
-      <div class="logo">RapidCTQA</div>
+      <div class="logo-container">
+        <div class="logo">RapidCTQA</div>
+        <span id="dashboard-version" class="version-tag"></span>
+      </div>
       <div id="connection-status" class="badge badge-pending">Connecting...</div>
     </header>
 
@@ -74,8 +77,13 @@
       <div class="cockpit-header">
         <div class="cockpit-title">
           <span class="cockpit-logo">⬡</span>
-          <span id="cockpit-patient-name">Loading...</span>
-          <span id="cockpit-protocol" class="cockpit-protocol-label"></span>
+          <div style="display: flex; flex-direction: column;">
+            <div style="display: flex; align-items: center; gap: 0.5rem;">
+              <span id="cockpit-patient-name">Loading...</span>
+              <span id="cockpit-version" class="version-tag" style="font-size: 0.6rem; padding: 0.1rem 0.4rem;"></span>
+            </div>
+            <span id="cockpit-protocol" class="cockpit-protocol-label"></span>
+          </div>
         </div>
         <div class="cockpit-header-right">
           <span id="cockpit-slice-label" class="cockpit-slice-label">Slice 0 / 0</span>

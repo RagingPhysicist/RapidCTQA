@@ -215,6 +215,7 @@ async def startup_event():
 @app.get("/api/status", response_model=IngestionStatus)
 async def get_status():
     return IngestionStatus(
+        version=str(config_web.get("app", {}).get("version", "0.0")),
         active_transfers=0,
         queue_size=len(results_cache),
         processed_today=len(results_cache)

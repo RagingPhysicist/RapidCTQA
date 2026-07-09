@@ -25,6 +25,7 @@ class StudySummary(BaseModel):
     instance_count: int
 
 class IngestionStatus(BaseModel):
+    version: str
     active_transfers: int
     queue_size: int
     processed_today: int
