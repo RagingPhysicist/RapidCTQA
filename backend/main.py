@@ -287,11 +287,29 @@ async def run_validation(series_uid: str, background_tasks: BackgroundTasks):
     background_tasks.add_task(on_series_received, series_uid)
     return {"message": "Validation triggered"}
 
+def _get_series_ct_files(series_uid: str) -> List[str]:
+    """Get only CT image files for a series, sorted by Z-position."""
+    study_path = os.path.join(STORAGE_DIR, series_uid)
+    all_files = glob.glob(os.path.join(study_path, "*.dcm"))
+    ct_files = []
+    for f in all_files:
+        try:
+            # Quick check SOP Class without full read if possible
+            ds = pydicom.dcmread(f, stop_before_pixels=True)
+            if ds.SOPClassUID == '1.2.840.10008.5.1.4.1.1.2':
+                ct_files.append((f, float(getattr(ds, 'ImagePositionPatient', [0, 0, 0])[2])))
+        except Exception:
+            continue
+
+    # Sort by Z
+    ct_files.sort(key=lambda x: x[1])
+    return [f[0] for f in ct_files]
+
+
 @app.get("/api/viewer/{series_uid}/info")
 async def viewer_info(series_uid: str):
     """Return slice count, sorted file list index, patient info and QA flags for the web viewer."""
-    study_path = os.path.join(STORAGE_DIR, series_uid)
-    dicom_files = sorted(glob.glob(os.path.join(study_path, "*.dcm")))
+    dicom_files = _get_series_ct_files(series_uid)
     if not dicom_files:
         raise HTTPException(status_code=404, detail="Series not found")
 
@@ -313,6 +331,14 @@ async def viewer_info(series_uid: str):
     except Exception:
         pass
 
+    # RTSS and Reference Point
+    has_rtss = False
+    reference_point = None
+    if series_uid in results_cache:
+        result = results_cache[series_uid]
+        has_rtss = result.metrics.get("has_rtss", False)
+        reference_point = result.metrics.get("reference_point")
+
     return {
         "series_uid": series_uid,
         "patient_name": patient_name,
@@ -320,10 +346,12 @@ async def viewer_info(series_uid: str):
         "slice_count": len(dicom_files),
         "flags": flags,
         "wl_presets": wl_presets,
+        "has_rtss": has_rtss,
+        "reference_point": reference_point,
     }
 
 
-def _render_slice_png(dcm_path: str, window_width: float, window_level: float, metal_threshold: float) -> bytes:
+def _render_slice_png(dcm_path: str, window_width: float, window_level: float, metal_threshold: float, reference_point: dict = None) -> bytes:
     """Render a single DICOM slice as a PNG byte stream with W/L and optional metal overlay."""
     ds = pydicom.dcmread(dcm_path)
     img = ds.pixel_array.astype(np.float32)
@@ -344,6 +372,31 @@ def _render_slice_png(dcm_path: str, window_width: float, window_level: float, m
     if np.any(metal_mask):
         rgb[metal_mask] = np.array([220, 50, 50], dtype=np.uint8)
 
+    # Reference point overlay (crosshair)
+    if reference_point:
+        try:
+            # Check if Z matches
+            img_z = float(ds.ImagePositionPatient[2])
+            slice_thickness = float(ds.SliceThickness)
+            if abs(img_z - reference_point['z']) < (slice_thickness / 2.0):
+                # Convert patient coordinates to pixel coordinates
+                # Pixel = (Patient - Origin) / Spacing
+                origin = ds.ImagePositionPatient
+                spacing = ds.PixelSpacing
+                px_x = int((reference_point['x'] - float(origin[0])) / float(spacing[0]))
+                px_y = int((reference_point['y'] - float(origin[1])) / float(spacing[1]))
+
+                rows, cols = rgb.shape[0], rgb.shape[1]
+                if 0 <= px_x < cols and 0 <= px_y < rows:
+                    # Draw a yellow crosshair (size 20px)
+                    size = 10
+                    # Vertical line
+                    rgb[max(0, px_y-size):min(rows, px_y+size), px_x] = [255, 255, 0]
+                    # Horizontal line
+                    rgb[px_y, max(0, px_x-size):min(cols, px_x+size)] = [255, 255, 0]
+        except Exception as e:
+            print(f"Error drawing reference point: {e}")
+
     pil_img = Image.fromarray(rgb, mode='RGB')
     buf = io.BytesIO()
     pil_img.save(buf, format='PNG', optimize=False)
@@ -360,14 +413,17 @@ async def viewer_slice(
     metal: bool = Query(default=True),
 ):
     """Return a single DICOM slice as a PNG image with W/L and metal overlay applied."""
-    study_path = os.path.join(STORAGE_DIR, series_uid)
-    dicom_files = sorted(glob.glob(os.path.join(study_path, "*.dcm")))
+    dicom_files = _get_series_ct_files(series_uid)
     if not dicom_files:
         raise HTTPException(status_code=404, detail="Series not found")
     if index < 0 or index >= len(dicom_files):
         raise HTTPException(status_code=400, detail=f"Slice index out of range (0–{len(dicom_files)-1})")
 
     metal_threshold = engine.config.get("thresholds", {}).get("implants", {}).get("metal_threshold_hu", 3000) if metal else 1e9
+
+    reference_point = None
+    if series_uid in results_cache:
+        reference_point = results_cache[series_uid].metrics.get("reference_point")
 
     try:
         png_bytes = await asyncio.get_event_loop().run_in_executor(
@@ -377,6 +433,7 @@ async def viewer_slice(
             ww,
             wl,
             metal_threshold,
+            reference_point,
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Slice render failed: {e}")

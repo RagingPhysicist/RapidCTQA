@@ -1,5 +1,5 @@
 from pynetdicom import AE, evt
-from pynetdicom.sop_class import CTImageStorage
+from pynetdicom.sop_class import CTImageStorage, RTStructureSetStorage
 import os
 import pydicom
 import threading
@@ -18,6 +18,7 @@ class DicomListener:
     def start(self, host: str = "0.0.0.0", port: int = 11112):
         ae = AE(ae_title="RT_QA_SCP")
         ae.add_supported_context(CTImageStorage)
+        ae.add_supported_context(RTStructureSetStorage)
         
         handlers = [
             (evt.EVT_C_STORE, self._handle_store),
@@ -33,20 +34,24 @@ class DicomListener:
         Dose Reports (Modality != CT or different SOP Class),
         and objects without pixel data.
         """
-        # 1. Must be CT modality
+        # 1. Check for RT Structure Set
+        if getattr(ds, 'SOPClassUID', '') == '1.2.840.10008.5.1.4.1.1.481.3':
+            return True
+
+        # 2. Must be CT modality
         if getattr(ds, 'Modality', '') != 'CT':
             return False
 
-        # 2. Must be CT Image Storage SOP Class
+        # 3. Must be CT Image Storage SOP Class
         if getattr(ds, 'SOPClassUID', '') != '1.2.840.10008.5.1.4.1.1.2':
             return False
 
-        # 3. Must NOT be a Localizer (Scout/Topogram)
+        # 4. Must NOT be a Localizer (Scout/Topogram)
         image_type = getattr(ds, 'ImageType', [])
         if any('LOCALIZER' in str(t).upper() for t in image_type):
             return False
 
-        # 4. Must have pixel data
+        # 5. Must have pixel data
         if not hasattr(ds, 'PixelData'):
             return False
 
@@ -60,7 +65,22 @@ class DicomListener:
             # Silently ignore non-axial CT files (scouts, reports, etc.)
             return 0x0000
 
+        # For RT Structure Sets, we try to associate them with the CT series they reference
         series_uid = ds.SeriesInstanceUID
+        if ds.SOPClassUID == '1.2.840.10008.5.1.4.1.1.481.3':
+            # Try to get Referenced Series Instance UID
+            try:
+                if hasattr(ds, 'ReferencedFrameOfReferenceSequence'):
+                    for for_item in ds.ReferencedFrameOfReferenceSequence:
+                        if hasattr(for_item, 'RTReferencedStudySequence'):
+                            for study_item in for_item.RTReferencedStudySequence:
+                                if hasattr(study_item, 'RTReferencedSeriesSequence'):
+                                    for series_item in study_item.RTReferencedSeriesSequence:
+                                        series_uid = series_item.SeriesInstanceUID
+                                        break
+            except Exception:
+                pass
+
         study_dir = os.path.join(self.storage_dir, series_uid)
         os.makedirs(study_dir, exist_ok=True)
         

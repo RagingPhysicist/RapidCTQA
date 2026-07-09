@@ -151,6 +151,21 @@ async function launchCockpit(seriesUid) {
     document.getElementById('cockpit-patient-name').textContent = info.patient_name;
     document.getElementById('cockpit-protocol').textContent = info.protocol;
 
+    // Handle RTSS info
+    const rtssSection = document.getElementById('cockpit-rtss-section');
+    if (info.has_rtss) {
+      rtssSection.style.display = 'block';
+      const refPtCoords = document.getElementById('cockpit-ref-pt-coords');
+      if (info.reference_point) {
+        const rp = info.reference_point;
+        refPtCoords.innerHTML = `${rp.name || 'Point'}<br>X: ${rp.x.toFixed(1)}, Y: ${rp.y.toFixed(1)}, Z: ${rp.z.toFixed(1)}`;
+      } else {
+        refPtCoords.textContent = 'None detected';
+      }
+    } else {
+      rtssSection.style.display = 'none';
+    }
+
     // Configure nav slider
     const navSlider = document.getElementById('cockpit-nav-slider');
     navSlider.min = 0;
