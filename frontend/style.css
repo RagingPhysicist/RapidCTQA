@@ -545,6 +545,16 @@ td {
   border-radius: 0.5rem;
   padding: 0.5rem 0.75rem;
   border: 1px solid var(--border);
+  transition: background 0.2s, border-color 0.2s;
+}
+
+.cockpit-flag.clickable {
+  cursor: pointer;
+}
+
+.cockpit-flag.clickable:hover {
+  background: rgba(255, 255, 255, 0.1);
+  border-color: var(--primary);
 }
 
 .cockpit-flag-dot {
