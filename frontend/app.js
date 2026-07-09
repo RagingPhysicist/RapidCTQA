@@ -7,6 +7,8 @@ async function fetchStatus() {
     document.getElementById('active-transfers').textContent = data.active_transfers;
     document.getElementById('queue-size').textContent = data.queue_size;
     document.getElementById('processed-today').textContent = data.processed_today;
+    document.getElementById('dashboard-version').textContent = `v${data.version}`;
+    cockpitState.version = data.version;
     document.getElementById('connection-status').textContent = 'Connected';
     document.getElementById('connection-status').className = 'badge badge-accept';
   } catch (error) {
@@ -125,6 +127,7 @@ const cockpitState = {
   wl_presets: {},
   loadTimer: null,
   zoom: 1.0,
+  version: '0.0',
 };
 
 async function launchCockpit(seriesUid) {
@@ -135,6 +138,7 @@ async function launchCockpit(seriesUid) {
 
   const overlay = document.getElementById('cockpit-overlay');
   overlay.classList.add('open');
+  document.getElementById('cockpit-version').textContent = `v${cockpitState.version}`;
 
   // Disable buttons while loading
   _setCockpitButtonsEnabled(false);
