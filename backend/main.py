@@ -470,14 +470,40 @@ async def approve_series(series_uid: str):
 
 @app.post("/api/viewer/{series_uid}/reject")
 async def reject_series(series_uid: str):
-    """Reject a series and log the decision."""
-    log_path = os.path.join(ROOT_DIR, "rejections.log")
+    """Reject a series, delete all its data, and log the decision."""
     try:
+        # 1. Remove from STORAGE_DIR
+        study_path = os.path.join(STORAGE_DIR, series_uid)
+        if os.path.isdir(study_path):
+            shutil.rmtree(study_path, ignore_errors=True)
+
+        # 2. Remove from EXPORT_DIR
+        export_path = os.path.join(EXPORT_DIR, series_uid)
+        if os.path.isdir(export_path):
+            shutil.rmtree(export_path, ignore_errors=True)
+
+        # 3. Remove PDF report
+        pdf_path = os.path.join(REPORTS_DIR, f"QA_Report_{series_uid}.pdf")
+        if os.path.exists(pdf_path):
+            try:
+                os.remove(pdf_path)
+            except Exception:
+                pass
+
+        # 4. Clear caches
+        with results_cache_lock:
+            results_cache.pop(series_uid, None)
+            ct_files_cache.pop(series_uid, None)
+
+        # 5. Log rejection
+        log_path = os.path.join(ROOT_DIR, "rejections.log")
         with open(log_path, "a") as f:
-            f.write(f"{series_uid} rejected\n")
+            f.write(f"{datetime.now().isoformat()} - {series_uid} rejected and deleted\n")
+
         return {"message": f"{series_uid} rejected"}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Rejection logging failed: {e}")
+        print(f"Error during series rejection: {e}")
+        raise HTTPException(status_code=500, detail=f"Rejection failed: {e}")
 
 @app.get("/api/reports/{series_uid}/pdf")
 async def get_pdf_report(series_uid: str):

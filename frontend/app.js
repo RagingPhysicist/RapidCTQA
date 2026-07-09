@@ -305,6 +305,11 @@ async function cockpitApprove() {
 async function cockpitReject() {
   const { seriesUid } = cockpitState;
   if (!seriesUid) return;
+
+  if (!confirm("Are you sure you want to REJECT and PERMANENTLY DELETE this series and all its results?")) {
+    return;
+  }
+
   _setCockpitButtonsEnabled(false);
   try {
     const res = await fetch(`${API_BASE}/viewer/${seriesUid}/reject`, { method: 'POST' });
