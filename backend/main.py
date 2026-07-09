@@ -232,12 +232,43 @@ async def get_studies(background_tasks: BackgroundTasks):
         if not files:
             continue
             
-        # Get metadata from first file
-        ds = pydicom.dcmread(files[0], stop_before_pixels=True)
-        patient_name = str(getattr(ds, 'PatientName', 'Unknown'))
-        protocol = str(getattr(ds, 'ProtocolName', 'Unknown'))
-        patient_id = str(getattr(ds, 'PatientID', 'Unknown'))
-        study_date = str(getattr(ds, 'StudyDate', 'Unknown'))
+        # Use cached result if available for core fields
+        cached_res = results_cache.get(series_uid)
+
+        patient_name = "Unknown"
+        protocol = "Unknown"
+        patient_id = "Unknown"
+        study_date = "Unknown"
+
+        if cached_res:
+            patient_name = cached_res.patient_name
+            protocol = cached_res.protocol
+
+        # Find first CT file for remaining metadata if needed
+        metadata_found = False
+        if not cached_res or protocol == "Unknown" or patient_id == "Unknown":
+            # Sort files to be somewhat deterministic, but try to find a CT slice
+            for f in sorted(files):
+                try:
+                    ds = pydicom.dcmread(f, stop_before_pixels=True)
+                    # Prefer CT Image Storage
+                    if getattr(ds, 'SOPClassUID', '') == '1.2.840.10008.5.1.4.1.1.2':
+                        patient_name = str(getattr(ds, 'PatientName', patient_name))
+                        protocol = str(getattr(ds, 'ProtocolName', protocol))
+                        patient_id = str(getattr(ds, 'PatientID', 'Unknown'))
+                        study_date = str(getattr(ds, 'StudyDate', 'Unknown'))
+                        metadata_found = True
+                        break
+                except Exception:
+                    continue
+
+            # Fallback to first file if no CT found
+            if not metadata_found:
+                ds = pydicom.dcmread(files[0], stop_before_pixels=True)
+                patient_name = str(getattr(ds, 'PatientName', patient_name))
+                protocol = str(getattr(ds, 'ProtocolName', protocol))
+                patient_id = str(getattr(ds, 'PatientID', 'Unknown'))
+                study_date = str(getattr(ds, 'StudyDate', 'Unknown'))
         
         status = "PENDING"
         if listener.is_ingesting(series_uid):
@@ -323,9 +354,31 @@ async def viewer_info(series_uid: str):
     if not dicom_files:
         raise HTTPException(status_code=404, detail="Series not found")
 
-    ds = pydicom.dcmread(dicom_files[0], stop_before_pixels=True)
-    patient_name = str(getattr(ds, 'PatientName', 'Unknown'))
-    protocol = str(getattr(ds, 'ProtocolName', 'Unknown'))
+    patient_name = "Unknown"
+    protocol = "Unknown"
+
+    # Try to get from cache first
+    if series_uid in results_cache:
+        res = results_cache[series_uid]
+        patient_name = res.patient_name
+        protocol = res.protocol
+
+    # Fallback to robust reading from files if cache is missing or incomplete
+    if patient_name == "Unknown" or protocol == "Unknown":
+        for f in dicom_files:
+            try:
+                ds = pydicom.dcmread(f, stop_before_pixels=True)
+                if patient_name == "Unknown":
+                    patient_name = str(getattr(ds, 'PatientName', 'Unknown'))
+                if protocol == "Unknown":
+                    p = str(getattr(ds, 'ProtocolName', 'Unknown'))
+                    if p != "Unknown" and p.strip() != "":
+                        protocol = p
+
+                if patient_name != "Unknown" and protocol != "Unknown":
+                    break
+            except Exception:
+                continue
 
     flags = []
     if series_uid in results_cache:

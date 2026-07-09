@@ -131,9 +131,16 @@ class QAEngine:
 
         series_uid = datasets[0].SeriesInstanceUID
         patient_name = str(getattr(datasets[0], 'PatientName', 'Unknown'))
-        protocol = str(getattr(datasets[0], 'ProtocolName', 'Unknown'))
         
-        metrics = self._compute_metrics(datasets)
+        # Robust ProtocolName extraction from CT datasets
+        protocol = "Unknown"
+        for ds in datasets:
+            p = str(getattr(ds, 'ProtocolName', 'Unknown'))
+            if p != "Unknown" and p.strip() != "":
+                protocol = p
+                break
+
+        metrics = self._compute_metrics(datasets, protocol=protocol)
 
         # --- Handle RTSS Findings ---
         metrics["has_rtss"] = len(rtss_datasets) > 0
@@ -159,7 +166,7 @@ class QAEngine:
             flags=flags
         )
 
-    def _compute_metrics(self, datasets: List[pydicom.Dataset]) -> Dict[str, Any]:
+    def _compute_metrics(self, datasets: List[pydicom.Dataset], protocol: str = "Unknown") -> Dict[str, Any]:
         pixel_data = np.stack([ds.pixel_array for ds in datasets])
         rescale_slope = getattr(datasets[0], 'RescaleSlope', 1.0)
         rescale_intercept = getattr(datasets[0], 'RescaleIntercept', 0.0)
@@ -176,10 +183,10 @@ class QAEngine:
         # --- Agent: GeometryGuardian ---
         # Identify if this is a head/neck scan to ignore posterior table truncation
         study_desc = str(getattr(datasets[0], 'StudyDescription', '')).lower()
-        protocol = str(getattr(datasets[0], 'ProtocolName', '')).lower()
+        protocol_lower = protocol.lower()
         body_part = str(getattr(datasets[0], 'BodyPartExamined', '')).lower()
         
-        is_head_scan = any(term in study_desc or term in protocol or term in body_part 
+        is_head_scan = any(term in study_desc or term in protocol_lower or term in body_part
                            for term in ['head', 'neck', 'brain', 'c-spine', 'cspine', 'cervical'])
 
         # Logic: Scan image matrix perimeter. If count(edge_buffer > skin_threshold) >= 5 on any slice, trigger TRUNCATION_ERROR.
@@ -369,7 +376,7 @@ class QAEngine:
         # Both StudyDescription and ProtocolName contain "(Child)" or "(Adult)".
         # Mismatch = patient age marker doesn't match protocol marker, OR age itself contradicts marker.
         study_desc = str(getattr(datasets[0], 'StudyDescription', ''))
-        protocol = str(getattr(datasets[0], 'ProtocolName', ''))
+
         patient_age_str = str(getattr(datasets[0], 'PatientAge', ''))
 
         pediatric_mismatch = False
@@ -419,7 +426,7 @@ class QAEngine:
         metrics = {
             "series_uid": datasets[0].SeriesInstanceUID,
             "patient_name": str(getattr(datasets[0], 'PatientName', 'Unknown')),
-            "protocol": str(getattr(datasets[0], 'ProtocolName', 'Unknown')),
+            "protocol": protocol,
             "slice_count": len(datasets),
             "slice_thickness": float(datasets[0].SliceThickness),
             "slice_spacing_var": slice_spacing_var,
