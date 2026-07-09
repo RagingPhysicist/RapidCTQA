@@ -395,13 +395,20 @@ async def viewer_info(series_uid: str):
     except Exception:
         pass
 
-    # RTSS and Reference Point
+    # RTSS, Reference Point and Auto-zoom metrics
     has_rtss = False
     reference_point = None
+    rows = 512
+    cols = 512
+    body_extent = None
+
     if series_uid in results_cache:
         result = results_cache[series_uid]
         has_rtss = result.metrics.get("has_rtss", False)
         reference_point = result.metrics.get("reference_point")
+        rows = result.metrics.get("rows", rows)
+        cols = result.metrics.get("cols", cols)
+        body_extent = result.metrics.get("body_extent")
 
     return {
         "series_uid": series_uid,
@@ -412,6 +419,9 @@ async def viewer_info(series_uid: str):
         "wl_presets": wl_presets,
         "has_rtss": has_rtss,
         "reference_point": reference_point,
+        "rows": rows,
+        "cols": cols,
+        "body_extent": body_extent,
     }
 
 

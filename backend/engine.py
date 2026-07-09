@@ -292,6 +292,22 @@ class QAEngine:
         metal_surface = all_metal_voxels & interior_mask & ~shrunk_mask
         metal_external = all_metal_voxels & ~interior_mask
 
+        # --- Body Extent Calculation ---
+        rows, cols = hu_volume.shape[1], hu_volume.shape[2]
+        if np.any(interior_mask):
+            coords = np.argwhere(interior_mask)
+            # coords is [z, y, x]
+            min_y, min_x = coords[:, 1].min(), coords[:, 2].min()
+            max_y, max_x = coords[:, 1].max(), coords[:, 2].max()
+            body_extent = {
+                "min_row": int(min_y),
+                "max_row": int(max_y),
+                "min_col": int(min_x),
+                "max_col": int(max_x)
+            }
+        else:
+            body_extent = None
+
         # --- Marker Detection Heuristic ---
         # Detect 3 high-density dots on the skin (1 anterior, 2 lateral)
         marker_voxels = np.zeros_like(all_metal_voxels, dtype=bool)
@@ -459,6 +475,9 @@ class QAEngine:
             "rescale_slope": rescale_slope,
             "marker_detected": len(marker_slices) > 0,
             "marker_slices": marker_slices,
+            "rows": rows,
+            "cols": cols,
+            "body_extent": body_extent,
         }
         return metrics
 

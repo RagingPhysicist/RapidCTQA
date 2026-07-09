@@ -127,6 +127,8 @@ const cockpitState = {
   wl_presets: {},
   loadTimer: null,
   zoom: 1.0,
+  originX: 'center',
+  originY: 'center',
   version: '0.0',
 };
 
@@ -134,6 +136,8 @@ async function launchCockpit(seriesUid) {
   cockpitState.seriesUid = seriesUid;
   cockpitState.sliceIndex = 0;
   cockpitState.zoom = 1.0;
+  cockpitState.originX = 'center';
+  cockpitState.originY = 'center';
   _applyCockpitZoom();
 
   const overlay = document.getElementById('cockpit-overlay');
@@ -154,6 +158,30 @@ async function launchCockpit(seriesUid) {
 
     document.getElementById('cockpit-patient-name').textContent = info.patient_name;
     document.getElementById('cockpit-protocol').textContent = info.protocol;
+
+    // Auto-zoom based on body extent
+    if (info.body_extent) {
+      const ext = info.body_extent;
+      const bodyWidth = ext.max_col - ext.min_col;
+      const bodyHeight = ext.max_row - ext.min_row;
+
+      if (bodyWidth > 0 && bodyHeight > 0) {
+        // We want the body to fill about 85% of the view
+        const zoomX = info.cols / bodyWidth;
+        const zoomY = info.rows / bodyHeight;
+        cockpitState.zoom = Math.min(zoomX, zoomY) * 0.85;
+
+        // Clamp zoom to reasonable levels
+        cockpitState.zoom = Math.min(3.0, Math.max(1.0, cockpitState.zoom));
+
+        // Center origin on the body
+        const centerX = (ext.min_col + ext.max_col) / 2;
+        const centerY = (ext.min_row + ext.max_row) / 2;
+        cockpitState.originX = `${(centerX / info.cols) * 100}%`;
+        cockpitState.originY = `${(centerY / info.rows) * 100}%`;
+        _applyCockpitZoom();
+      }
+    }
 
     // Handle RTSS info
     const rtssSection = document.getElementById('cockpit-rtss-section');
@@ -219,6 +247,8 @@ function closeCockpit() {
   img.style.transform = 'scale(1)';
   cockpitState.seriesUid = null;
   cockpitState.zoom = 1.0;
+  cockpitState.originX = 'center';
+  cockpitState.originY = 'center';
 }
 
 function refreshCockpitSlice() {
@@ -339,13 +369,15 @@ function zoomCockpit(delta) {
 
 function resetCockpitZoom() {
   cockpitState.zoom = 1.0;
+  cockpitState.originX = 'center';
+  cockpitState.originY = 'center';
   _applyCockpitZoom();
 }
 
 function _applyCockpitZoom() {
   const img = document.getElementById('cockpit-image');
   img.style.transform = `scale(${cockpitState.zoom})`;
-  img.style.transformOrigin = 'center center';
+  img.style.transformOrigin = `${cockpitState.originX} ${cockpitState.originY}`;
   document.getElementById('cockpit-zoom-label').textContent = `${Math.round(cockpitState.zoom * 100)}%`;
 }
 
