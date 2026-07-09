@@ -4,7 +4,7 @@ import scipy.ndimage as ndimage
 import yaml
 import os
 from concurrent.futures import ThreadPoolExecutor
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from .models import QAResult, QAFlag
 
 class QAEngine:
@@ -63,25 +63,56 @@ class QAEngine:
             "metrics": f"Calculated Roll: {round(-best_angle_offset, 2)}° (Profile Similarity: {round(max_symmetry_score * 100, 2)}%)"
         }
 
+    def _extract_reference_point(self, rtss: pydicom.Dataset) -> Optional[Dict[str, Any]]:
+        """Extract reference point or isocenter coordinates from RT Structure Set."""
+        if not hasattr(rtss, 'ROIContourSequence') or not hasattr(rtss, 'StructureSetROISequence'):
+            return None
+
+        # 1. Map ROI Numbers to Names
+        roi_map = {}
+        for ss_roi in rtss.StructureSetROISequence:
+            roi_map[ss_roi.ROINumber] = ss_roi.ROIName.upper()
+
+        # 2. Look for ROIs containing 'REFERENCE' or 'ISOCENTER' or 'ISO'
+        for roi_contour in rtss.ROIContourSequence:
+            roi_name = roi_map.get(roi_contour.ReferencedROINumber, "")
+            # Flexible matching for names like "NewReferencePoint1" or "Isocenter"
+            if "REFERENCE" in roi_name or "ISOCENTER" in roi_name or "ISO" in roi_name:
+                # ROI coordinates are stored in the Contour Data (3006,0050) element
+                if hasattr(roi_contour, 'ContourSequence') and len(roi_contour.ContourSequence) > 0:
+                    contour = roi_contour.ContourSequence[0]
+                    if hasattr(contour, 'ContourData') and len(contour.ContourData) >= 3:
+                        return {
+                            "x": float(contour.ContourData[0]),
+                            "y": float(contour.ContourData[1]),
+                            "z": float(contour.ContourData[2]),
+                            "name": roi_map.get(roi_contour.ReferencedROINumber, "Unknown")
+                        }
+        return None
+
     def analyze_series(self, dicom_files: List[str]) -> QAResult:
         # Parallelise IO-bound DICOM reads
         with ThreadPoolExecutor(max_workers=4) as pool:
-            datasets = list(pool.map(pydicom.dcmread, dicom_files))
+            all_datasets = list(pool.map(pydicom.dcmread, dicom_files))
 
-        # --- Fallback Filtering ---
+        # --- Separate CT from RTSS ---
+        datasets = [ds for ds in all_datasets if getattr(ds, 'SOPClassUID', '') == '1.2.840.10008.5.1.4.1.1.2']
+        rtss_datasets = [ds for ds in all_datasets if getattr(ds, 'SOPClassUID', '') == '1.2.840.10008.5.1.4.1.1.481.3']
+
+        # --- Fallback Filtering for CT ---
         # Ensure we only process images with consistent dimensions (Rows/Cols)
-        # and that are actually CT Image Storage (in case files were added manually to the dir)
         if datasets:
+            # Sort by Z-position to ensure consistent indexing
+            datasets.sort(key=lambda x: float(getattr(x, 'ImagePositionPatient', [0, 0, 0])[2]))
+
             # Pivot on the first dataset
             ref_rows = getattr(datasets[0], 'Rows', 0)
             ref_cols = getattr(datasets[0], 'Columns', 0)
-            ref_sop = getattr(datasets[0], 'SOPClassUID', '')
 
             valid_datasets = []
             for ds in datasets:
                 if (getattr(ds, 'Rows', 0) == ref_rows and
                     getattr(ds, 'Columns', 0) == ref_cols and
-                    getattr(ds, 'SOPClassUID', '') == ref_sop and
                     'LOCALIZER' not in [str(t).upper() for t in getattr(ds, 'ImageType', [])]):
                     valid_datasets.append(ds)
 
@@ -103,6 +134,14 @@ class QAEngine:
         protocol = str(getattr(datasets[0], 'ProtocolName', 'Unknown'))
         
         metrics = self._compute_metrics(datasets)
+
+        # --- Handle RTSS Findings ---
+        metrics["has_rtss"] = len(rtss_datasets) > 0
+        metrics["reference_point"] = None
+        if rtss_datasets:
+            ref_pt = self._extract_reference_point(rtss_datasets[0])
+            metrics["reference_point"] = ref_pt
+
         flags = self._evaluate_rules(metrics)
         
         status = "ACCEPT"

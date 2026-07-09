@@ -3,7 +3,7 @@ import json
 import glob
 import pydicom
 from pynetdicom import AE
-from pynetdicom.sop_class import CTImageStorage
+from pynetdicom.sop_class import CTImageStorage, RTStructureSetStorage
 
 def get_destinations():
     root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -46,6 +46,7 @@ def send_dicom_series(series_path: str):
 
     ae = AE()
     ae.add_requested_context(CTImageStorage)
+    ae.add_requested_context(RTStructureSetStorage)
 
     for dest in destinations:
         ae_title = dest.get("ae_title")
