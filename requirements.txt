@@ -12,3 +12,4 @@ customtkinter
 matplotlib
 scikit-image
 pytest
+pytest-asyncio

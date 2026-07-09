@@ -4,6 +4,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import os, shutil, glob, sys, json, yaml
+import platform
 import threading
 from backend.engine import QAEngine
 from backend.dicom_sender import send_dicom_series
@@ -11,11 +12,14 @@ from backend.dicom_sender import send_dicom_series
 # Load configuration
 def normalise_storage_path(path: str) -> str:
     """
-    Normalise the storage path, falling back to mapped drive letter on Windows if needed.
+    Normalise the storage path, falling back to mapped drive letter on Windows if needed,
+    or mapping UNC paths to /Volumes on macOS.
     """
     if not path:
-        return "./data/rtct"
-    if os.name == 'nt':
+        return ""
+
+    system = platform.system()
+    if system == "Windows":
         norm = os.path.normpath(path)
         unc_prefix = "\\\\imgserver\\DICOM"
         if norm.startswith(unc_prefix):
@@ -33,12 +37,29 @@ def normalise_storage_path(path: str) -> str:
                     return s_fallback
             except Exception:
                 pass
+        return norm
+    elif system == "Darwin":
+        # Map Windows UNC path to macOS /Volumes mount point
+        # Support both backslashes and forward slashes from config
+        p = path.replace("\\", "/")
+        unc_prefix = "//imgserver/DICOM"
+        if p.startswith(unc_prefix):
+            return p.replace(unc_prefix, "/Volumes/DICOM")
+
     return path
 
 try:
     with open("webApp.yaml", "r") as f:
         config_web = yaml.safe_load(f)
-    STORAGE_DIR = normalise_storage_path(config_web.get("backend", {}).get("storage", {}).get("path", "./data/rtct"))
+
+    raw_storage_path = config_web.get("backend", {}).get("storage", {}).get("path", "")
+    STORAGE_DIR = normalise_storage_path(raw_storage_path)
+
+    if not STORAGE_DIR:
+        STORAGE_DIR = "./data/rtct"
+    elif not os.path.isabs(STORAGE_DIR):
+        # cockpit.py is in root, so just use it
+        pass
 except Exception as e:
     print(f"Error loading webApp.yaml: {e}")
     STORAGE_DIR = "./data/rtct"

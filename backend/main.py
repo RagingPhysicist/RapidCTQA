@@ -12,6 +12,7 @@ import io
 import shutil
 import threading
 import yaml
+import platform
 from concurrent.futures import ThreadPoolExecutor
 from typing import List, Dict
 import numpy as np
@@ -50,11 +51,14 @@ app.add_middleware(
 
 def normalise_storage_path(path: str) -> str:
     """
-    Normalise the storage path, falling back to mapped drive letter on Windows if needed.
+    Normalise the storage path, falling back to mapped drive letter on Windows if needed,
+    or mapping UNC paths to /Volumes on macOS.
     """
     if not path:
-        return "./data/rtct"
-    if os.name == 'nt':
+        return ""
+
+    system = platform.system()
+    if system == "Windows":
         norm = os.path.normpath(path)
         unc_prefix = "\\\\imgserver\\DICOM"
         if norm.startswith(unc_prefix):
@@ -72,15 +76,24 @@ def normalise_storage_path(path: str) -> str:
                     return s_fallback
             except Exception:
                 pass
+        return norm
+    elif system == "Darwin":
+        # Map Windows UNC path to macOS /Volumes mount point
+        # Support both backslashes and forward slashes from config
+        p = path.replace("\\", "/")
+        unc_prefix = "//imgserver/DICOM"
+        if p.startswith(unc_prefix):
+            return p.replace(unc_prefix, "/Volumes/DICOM")
+
     return path
 
 raw_storage_path = config_web.get("backend", {}).get("storage", {}).get("path", "")
-if not raw_storage_path:
-    raw_storage_path = os.path.join(ROOT_DIR, "data", "rtct")
-elif not os.path.isabs(raw_storage_path):
-    raw_storage_path = os.path.join(ROOT_DIR, raw_storage_path)
-
 STORAGE_DIR = normalise_storage_path(raw_storage_path)
+
+if not STORAGE_DIR:
+    STORAGE_DIR = os.path.join(ROOT_DIR, "data", "rtct")
+elif not os.path.isabs(STORAGE_DIR):
+    STORAGE_DIR = os.path.join(ROOT_DIR, STORAGE_DIR)
 EXPORT_DIR = os.path.join(ROOT_DIR, "TPS_EXPORT")
 REPORTS_DIR = os.path.join(ROOT_DIR, "reports")
 FRONTEND_DIR = os.path.join(ROOT_DIR, "frontend")
