@@ -7,7 +7,7 @@ RapidCTQA is a specialized automated Quality Assurance (QA) tool for radiotherap
 - **Automated DICOM Ingestion**: Integrated DICOM SCP (C-STORE) listener for seamless ingestion from PACS or CT Scanners.
 - **Multi-Agent Analysis**: A suite of specialized agents evaluates geometry, image quality, HU accuracy, and clinical protocols.
 - **Artifact & Metal Detection**: Advanced detection of truncation, excessive bowel gas, and metallic implants (internal, surface, and external).
-- **Patient Alignment**: Automated detection of patient roll using DICOM `ImageOrientationPatient` metadata.
+- **Patient Alignment**: Automated detection of patient roll using Radon transform bilateral reflection symmetry profiling on the central slice.
 - **Interactive Dashboard**: Modern web interface for reviewing studies, detailed metrics, and QA flags.
 - **Automated Reporting**: Generates comprehensive PDF QA reports with slice-indexed findings.
 - **Clinical Integration**: Auto-exports accepted series to a designated "TPS Export" directory and routes them to configured DICOM destinations.
@@ -32,7 +32,7 @@ RapidCTQA is a specialized automated Quality Assurance (QA) tool for radiotherap
     python run.py
     ```
     - **Web Dashboard**: `http://localhost:8080`
-    - **DICOM Listener**: `0.0.0.0:11112` (AET: `RT_QA_SCP`)
+    - **DICOM Listener**: `0.0.0.0:11112` (AET: Configurable in `webApp.yaml`, defaults to `RT_QA_SCP`)
 
 ## QA Agents & Logic
 
@@ -64,8 +64,10 @@ Detects and classifies metallic objects (>2000 HU).
 
 ### 6. AlignmentAuditor (Patient Orientation)
 Checks for patient rotation relative to the couch.
-- **Roll Detection**: Calculates roll angle from `ImageOrientationPatient` vectors.
-- **Threshold**: Flags warnings for rotation > 3.0°.
+- **Roll Detection**: Quantifies precise patient roll by locating the true axis of bilateral reflection symmetry on the central slice of the series.
+- **Radon Transform Sweep**: Performs a fine-grained Radon transform sinogram sweep around the vertical axis (90°) with configurable thresholding and angular resolution.
+- **Symmetry Confidence**: Computes normalized cross-correlation between the projection profile and its mirrored counterpart. Requires confidence > 0.95 to trigger.
+- **Threshold**: Flags warnings (`ROLL_ALERT`) if roll exceeds 1.5° (or as configured in `ctqa.yaml`).
 
 ### 7. Integrity (Protocol & Resolution)
 Lead oversight for general clinical standards.
