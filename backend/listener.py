@@ -15,8 +15,8 @@ class DicomListener:
         self.timers: Dict[str, threading.Timer] = {}
         self._lock = threading.Lock()
 
-    def start(self, host: str = "0.0.0.0", port: int = 11112):
-        ae = AE(ae_title="RT_QA_SCP")
+    def start(self, host: str = "0.0.0.0", port: int = 11112, ae_title: str = "RT_QA_SCP"):
+        ae = AE(ae_title=ae_title)
         ae.add_supported_context(CTImageStorage)
         ae.add_supported_context(RTStructureSetStorage)
         
@@ -25,7 +25,7 @@ class DicomListener:
         ]
         
         self.server = ae.start_server((host, port), block=False, evt_handlers=handlers)
-        print(f"DICOM Listener started on {host}:{port}")
+        print(f"DICOM Listener started on {host}:{port} with AE Title '{ae_title}'")
 
     def _is_valid_axial_ct(self, ds: pydicom.Dataset) -> bool:
         """

@@ -41,8 +41,11 @@ Detects and classifies high-density metallic objects.
 
 ## 6. AlignmentAuditor
 Detects if the patient is rotated relative to the scanner's coordinate system.
-- **Roll Calculation**: Uses the `ImageOrientationPatient` (IOP) tag. It calculates the deviation of the row cosine vector from the ideal $[1, 0, 0]$ vector.
-- **Reporting**: Flags warnings if the roll angle exceeds $3.0^{\circ}$ on any slice.
+- **Roll Calculation**: Quantifies precise patient roll by locating the true axis of bilateral reflection symmetry on the central slice of the series, bypassing structural inertia limitations and segmentation noise.
+  - **Radon Transform Sweep**: Performs a fine-grained Radon transform sinogram sweep around the vertical axis ($80.0^{\circ}$ to $100.0^{\circ}$) with an angular step resolution (default: $0.1^{\circ}$) and Hounsfield Unit floor threshold (default: -300 HU) to isolate the structural mass from background noise.
+  - **Symmetry Confidence**: Computes the normalized cross-correlation between each 1D projection profile and its flipped/mirrored counterpart.
+  - **Confidence Filter**: Only slices with maximum cross-correlation (confidence) $\ge 0.90$ are processed.
+- **Evaluation & Alerts**: Flags a conditional warning (`ROLL_ALERT`) if the detected roll angle exceeds $1.5^{\circ}$ (or the configured limit in `ctqa.yaml`, defaulting to $1.5^{\circ}$) and the symmetry confidence score is $> 0.95$.
 
 ## 7. Integrity Agent
 General oversight and protocol validation.

@@ -223,7 +223,8 @@ async def startup_event():
     dl_config = config_web.get("backend", {}).get("dicom_listener", {})
     host = dl_config.get("host", "0.0.0.0")
     port = dl_config.get("port", 11112)
-    listener.start(host=host, port=port)
+    ae_title = dl_config.get("aet", "RT_QA_SCP")
+    listener.start(host=host, port=port, ae_title=ae_title)
 
 @app.get("/api/status", response_model=IngestionStatus)
 async def get_status():

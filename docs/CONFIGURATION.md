@@ -9,7 +9,7 @@ This file controls the operational aspects of the application.
 - `dicom_listener`:
   - `host`: The IP address to bind the DICOM listener to (default: `0.0.0.0`).
   - `port`: The port for the DICOM listener (default: `11112`).
-  - `aet`: The Application Entity Title for the SCP (default: `RT_QA_SCP`).
+  - `aet`: The Application Entity Title for the SCP (default: `RT_QA_SCP`, loaded dynamically on startup).
 - `storage`:
   - `path`: The local or network directory where received DICOM files are stored.
 - `api`:
@@ -37,7 +37,9 @@ This file defines the clinical rules and thresholds used by the QA Engine.
   - `metal_threshold_hu`: HU value above which voxels are considered metal (default: `3000`).
   - `max_volume_cc`: Volume threshold for flagging metal artifacts (default: `0.2`).
 - **Alignment**:
-  - `max_allowable_tilt_deg`: Maximum allowed patient roll (default: `3.0`).
+  - `max_allowable_tilt_deg`: Maximum allowed patient roll (default: `1.5` degrees).
+  - `hu_floor`: The Hounsfield Unit threshold to isolate patient mass from background air (default: `-300`).
+  - `angular_step_deg`: The fine angular resolution step size in degrees for the Radon transform sweep (default: `0.1`).
 
 ### Rules
 The `rules` section maps specific checks to their severity (Reject, Conditional/Warning, or Accept). The engine evaluates these rules based on the metrics computed during analysis.
