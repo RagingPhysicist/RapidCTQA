@@ -623,3 +623,21 @@ td {
   cursor: not-allowed;
   filter: none;
 }
+
+#cockpit-ref-pt {
+  color: var(--text-muted);
+  transition: background 0.2s, border-color 0.2s;
+  padding: 0.5rem;
+  border-radius: 0.5rem;
+  border: 1px solid transparent;
+}
+
+#cockpit-ref-pt.clickable {
+  cursor: pointer;
+}
+
+#cockpit-ref-pt.clickable:hover {
+  background: rgba(255, 255, 255, 0.1);
+  border-color: var(--primary);
+  color: var(--text-main);
+}

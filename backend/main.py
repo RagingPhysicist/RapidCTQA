@@ -411,10 +411,32 @@ async def viewer_info(series_uid: str):
     # RTSS and Reference Point
     has_rtss = False
     reference_point = None
+    ref_point_slice_idx = None
     if series_uid in results_cache:
         result = results_cache[series_uid]
         has_rtss = result.metrics.get("has_rtss", False)
         reference_point = result.metrics.get("reference_point")
+
+        if reference_point:
+            # Find the closest slice to the reference point Z
+            ref_z = reference_point['z']
+            min_dist = float('inf')
+
+            # Use cached file list to find Z positions
+            for i, f in enumerate(dicom_files):
+                try:
+                    ds = pydicom.dcmread(f, stop_before_pixels=True)
+                    z = float(ds.ImagePositionPatient[2])
+                    dist = abs(z - ref_z)
+                    if dist < min_dist:
+                        min_dist = dist
+                        ref_point_slice_idx = i
+
+                    # Optimization: if we're moving away from the point, stop
+                    if dist > min_dist and i > 0:
+                        break
+                except Exception:
+                    continue
 
     return {
         "series_uid": series_uid,
@@ -425,6 +447,7 @@ async def viewer_info(series_uid: str):
         "wl_presets": wl_presets,
         "has_rtss": has_rtss,
         "reference_point": reference_point,
+        "ref_point_slice_idx": ref_point_slice_idx,
     }
 
 

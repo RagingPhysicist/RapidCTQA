@@ -157,14 +157,25 @@ async function launchCockpit(seriesUid) {
 
     // Handle RTSS info
     const rtssSection = document.getElementById('cockpit-rtss-section');
+    const refPtArea = document.getElementById('cockpit-ref-pt');
     if (info.has_rtss) {
       rtssSection.style.display = 'block';
       const refPtCoords = document.getElementById('cockpit-ref-pt-coords');
       if (info.reference_point) {
         const rp = info.reference_point;
         refPtCoords.innerHTML = `${rp.name || 'Point'}<br>X: ${rp.x.toFixed(1)}, Y: ${rp.y.toFixed(1)}, Z: ${rp.z.toFixed(1)}`;
+
+        if (info.ref_point_slice_idx !== null && info.ref_point_slice_idx !== undefined) {
+          refPtArea.classList.add('clickable');
+          refPtArea.onclick = () => jumpToSlice(info.ref_point_slice_idx + 1);
+        } else {
+          refPtArea.classList.remove('clickable');
+          refPtArea.onclick = null;
+        }
       } else {
         refPtCoords.textContent = 'None detected';
+        refPtArea.classList.remove('clickable');
+        refPtArea.onclick = null;
       }
     } else {
       rtssSection.style.display = 'none';
