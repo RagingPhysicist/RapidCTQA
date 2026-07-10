@@ -157,14 +157,25 @@ async function launchCockpit(seriesUid) {
 
     // Handle RTSS info
     const rtssSection = document.getElementById('cockpit-rtss-section');
+    const refPtArea = document.getElementById('cockpit-ref-pt');
     if (info.has_rtss) {
       rtssSection.style.display = 'block';
       const refPtCoords = document.getElementById('cockpit-ref-pt-coords');
       if (info.reference_point) {
         const rp = info.reference_point;
         refPtCoords.innerHTML = `${rp.name || 'Point'}<br>X: ${rp.x.toFixed(1)}, Y: ${rp.y.toFixed(1)}, Z: ${rp.z.toFixed(1)}`;
+
+        if (info.ref_point_slice_idx !== null && info.ref_point_slice_idx !== undefined) {
+          refPtArea.classList.add('clickable');
+          refPtArea.onclick = () => jumpToSlice(info.ref_point_slice_idx + 1);
+        } else {
+          refPtArea.classList.remove('clickable');
+          refPtArea.onclick = null;
+        }
       } else {
         refPtCoords.textContent = 'None detected';
+        refPtArea.classList.remove('clickable');
+        refPtArea.onclick = null;
       }
     } else {
       rtssSection.style.display = 'none';
@@ -190,15 +201,22 @@ async function launchCockpit(seriesUid) {
     const flagsEl = document.getElementById('cockpit-flags');
     if (info.flags && info.flags.length > 0) {
       const colours = { REJECT: '#ef4444', CONDITIONAL: '#f59e0b', ACCEPT: '#10b981', PASS: '#10b981' };
-      flagsEl.innerHTML = info.flags.map(f => `
-        <div class="cockpit-flag">
-          <div class="cockpit-flag-dot" style="background:${colours[f.status] || '#94a3b8'}"></div>
-          <div>
-            <div class="cockpit-flag-name">${f.name}</div>
-            <div class="cockpit-flag-msg">${f.message || ''}</div>
+      flagsEl.innerHTML = info.flags.map(f => {
+        // Detect slice indicators like "(Slice 5)" or "(Slices 10-15)"
+        const match = f.message ? f.message.match(/\(Slices?\s+(\d+)/) : null;
+        const clickable = match ? 'clickable' : '';
+        const onclick = match ? `onclick="jumpToSlice(${match[1]})"` : '';
+
+        return `
+          <div class="cockpit-flag ${clickable}" ${onclick}>
+            <div class="cockpit-flag-dot" style="background:${colours[f.status] || '#94a3b8'}"></div>
+            <div>
+              <div class="cockpit-flag-name">${f.name}</div>
+              <div class="cockpit-flag-msg">${f.message || ''}</div>
+            </div>
           </div>
-        </div>
-      `).join('');
+        `;
+      }).join('');
     } else {
       flagsEl.innerHTML = '<p style="font-size:0.8rem;color:var(--text-muted);">No issues detected.</p>';
     }
@@ -219,6 +237,14 @@ function closeCockpit() {
   img.style.transform = 'scale(1)';
   cockpitState.seriesUid = null;
   cockpitState.zoom = 1.0;
+}
+
+function jumpToSlice(sliceNum) {
+  const idx = parseInt(sliceNum, 10) - 1;
+  if (idx >= 0 && idx < cockpitState.sliceCount) {
+    cockpitState.sliceIndex = idx;
+    refreshCockpitSlice();
+  }
 }
 
 function refreshCockpitSlice() {
