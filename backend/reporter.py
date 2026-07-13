@@ -153,6 +153,9 @@ def generate_pdf_report(result: QAResult, output_path: str):
         ("Surface Metal Vol.", f"{result.metrics.get('metal_surface_cc', 0.0):.2f} cc"),
         ("External Metal Vol.", f"{result.metrics.get('metal_external_cc', 0.0):.2f} cc"),
         ("Max Patient Rotation", f"{result.metrics.get('max_tilt_deg', 0.0):.1f}°"),
+        ("Truncation Detected", "Yes" if result.metrics.get("truncation_detected") else "No"),
+        ("Truncation Error Detected", "Yes" if result.metrics.get("truncation_error") else "No"),
+        ("Tolerated Truncation Detected", "Yes" if result.metrics.get("tolerated_truncated_slices") else "No"),
     ]
 
     pdf.set_font('helvetica', '', 10)
@@ -174,6 +177,7 @@ def generate_pdf_report(result: QAResult, output_path: str):
     # Affected Slice Locations Section
     slice_metrics = [
         ("Truncated Slices", result.metrics.get("truncated_slices")),
+        ("Truncated Slices (Tolerated)", result.metrics.get("tolerated_truncated_slices")),
         ("Tilted/Rotated Slices", result.metrics.get("tilted_slices")),
         ("Gas Pockets Slices", result.metrics.get("gas_slices")),
         ("Metal Implants Slices", result.metrics.get("metal_slices")),

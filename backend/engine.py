@@ -209,6 +209,7 @@ class QAEngine:
         skin_threshold_hu = -200
         truncation_error = False
         truncated_slices = []
+        tolerated_truncated_slices = []
 
         for i, slice_data in enumerate(hu_volume):
             trunc_y, trunc_x = np.where((slice_data > skin_threshold_hu) & border_mask)
@@ -247,6 +248,8 @@ class QAEngine:
             if slice_truncated:
                 truncation_error = True
                 truncated_slices.append(i + 1)
+            else:
+                tolerated_truncated_slices.append(i + 1)
 
         # --- Agent: NoiseWhisperer ---
         # Logic: Crop 20x20px regions from the four extreme corners (Background Air).
@@ -472,7 +475,8 @@ class QAEngine:
             "monotonic_z": monotonic_z,
             "duplicate_slices": duplicate_slices,
             "gantry_tilt": float(getattr(datasets[0], 'GantryDetectorTilt', 0.0)),
-            "truncation_detected": truncation_error,
+            "truncation_detected": truncation_error or len(tolerated_truncated_slices) > 0,
+            "truncation_error": truncation_error,
             "background_air_sd": background_air_sd,
             "center_noise_std": center_noise_std,
             "air_hu_estimate": air_est,
@@ -490,6 +494,7 @@ class QAEngine:
             "metal_surface_slices": metal_surface_slices,
             "metal_external_slices": metal_external_slices,
             "truncated_slices": truncated_slices,
+            "tolerated_truncated_slices": tolerated_truncated_slices,
             "radon_roll_deg": roll_info["angle"],
             "radon_confidence": roll_info["confidence"],
             "radon_status": roll_info["status"],
@@ -538,7 +543,7 @@ class QAEngine:
         flags = []
         
         # --- GeometryGuardian Responsibilities ---
-        if metrics["truncation_detected"]:
+        if metrics.get("truncation_error", False):
             slice_info = self._format_slices(metrics.get("truncated_slices", []))
             flags.append(QAFlag(name="GeometryGuardian", status="REJECT", message=f"TRUNCATION_ERROR: Anatomy exceeds FOV{slice_info}"))
         
