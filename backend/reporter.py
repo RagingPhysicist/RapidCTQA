@@ -153,7 +153,8 @@ def generate_pdf_report(result: QAResult, output_path: str):
         ("Surface Metal Vol.", f"{result.metrics.get('metal_surface_cc', 0.0):.2f} cc"),
         ("External Metal Vol.", f"{result.metrics.get('metal_external_cc', 0.0):.2f} cc"),
         ("Max Patient Rotation", f"{result.metrics.get('max_tilt_deg', 0.0):.1f}°"),
-        ("Truncation Error Detected", "Yes" if result.metrics.get("truncation_detected") else "No"),
+        ("Truncation Detected", "Yes" if result.metrics.get("truncation_detected") else "No"),
+        ("Truncation Error Detected", "Yes" if result.metrics.get("truncation_error") else "No"),
         ("Tolerated Truncation Detected", "Yes" if result.metrics.get("tolerated_truncated_slices") else "No"),
     ]
 

@@ -475,7 +475,8 @@ class QAEngine:
             "monotonic_z": monotonic_z,
             "duplicate_slices": duplicate_slices,
             "gantry_tilt": float(getattr(datasets[0], 'GantryDetectorTilt', 0.0)),
-            "truncation_detected": truncation_error,
+            "truncation_detected": truncation_error or len(tolerated_truncated_slices) > 0,
+            "truncation_error": truncation_error,
             "background_air_sd": background_air_sd,
             "center_noise_std": center_noise_std,
             "air_hu_estimate": air_est,
@@ -542,7 +543,7 @@ class QAEngine:
         flags = []
         
         # --- GeometryGuardian Responsibilities ---
-        if metrics["truncation_detected"]:
+        if metrics.get("truncation_error", False):
             slice_info = self._format_slices(metrics.get("truncated_slices", []))
             flags.append(QAFlag(name="GeometryGuardian", status="REJECT", message=f"TRUNCATION_ERROR: Anatomy exceeds FOV{slice_info}"))
         

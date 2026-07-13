@@ -104,6 +104,8 @@ thresholds:
         self.assertIn("tolerated_truncated_slices", result_breast.metrics)
         self.assertEqual(result_breast.metrics["tolerated_truncated_slices"], [3])
         self.assertEqual(result_breast.metrics["truncated_slices"], [])
+        self.assertTrue(result_breast.metrics["truncation_detected"])
+        self.assertFalse(result_breast.metrics["truncation_error"])
 
         # 2. Test Head/Neck protocol (5 mm tolerance) -> Should reject
         paths_hn = self.create_ct_series(protocol="H&N C-Spine", study_desc="Brain Study")
@@ -118,6 +120,8 @@ thresholds:
         self.assertGreater(len(truncation_flags_hn), 0, "H&N scan should NOT tolerate 10mm lateral truncation")
         self.assertEqual(result_hn.metrics["truncated_slices"], [3])
         self.assertEqual(result_hn.metrics["tolerated_truncated_slices"], [])
+        self.assertTrue(result_hn.metrics["truncation_detected"])
+        self.assertTrue(result_hn.metrics["truncation_error"])
 
         # 3. Test Pelvis/Prostate protocol (0 mm tolerance) -> Should reject
         paths_pelvis = self.create_ct_series(protocol="Pelvis Prostate", study_desc="Prostate Study")
@@ -132,6 +136,8 @@ thresholds:
         self.assertGreater(len(truncation_flags_pelvis), 0, "Pelvis scan should NOT tolerate 10mm lateral truncation")
         self.assertEqual(result_pelvis.metrics["truncated_slices"], [3])
         self.assertEqual(result_pelvis.metrics["tolerated_truncated_slices"], [])
+        self.assertTrue(result_pelvis.metrics["truncation_detected"])
+        self.assertTrue(result_pelvis.metrics["truncation_error"])
 
     def test_generate_pdf_report_with_tolerated_truncation(self):
         paths_breast = self.create_ct_series(protocol="Breast Wingboard Scan", study_desc="Thorax Study")
