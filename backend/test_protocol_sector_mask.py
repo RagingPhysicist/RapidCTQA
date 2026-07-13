@@ -6,6 +6,7 @@ import numpy as np
 import os
 import shutil
 from backend.engine import QAEngine
+from backend.reporter import generate_pdf_report
 
 class TestProtocolSectorMask(unittest.TestCase):
     def setUp(self):
@@ -99,6 +100,11 @@ thresholds:
         truncation_flags = [f for f in result_breast.flags if "TRUNCATION_ERROR" in f.message]
         self.assertEqual(len(truncation_flags), 0, "Breast scan should tolerate 10mm lateral truncation")
 
+        # Verify metrics for tolerated truncation
+        self.assertIn("tolerated_truncated_slices", result_breast.metrics)
+        self.assertEqual(result_breast.metrics["tolerated_truncated_slices"], [3])
+        self.assertEqual(result_breast.metrics["truncated_slices"], [])
+
         # 2. Test Head/Neck protocol (5 mm tolerance) -> Should reject
         paths_hn = self.create_ct_series(protocol="H&N C-Spine", study_desc="Brain Study")
         ds = pydicom.dcmread(paths_hn[2])
@@ -110,6 +116,8 @@ thresholds:
         result_hn = self.engine.analyze_series(paths_hn)
         truncation_flags_hn = [f for f in result_hn.flags if "TRUNCATION_ERROR" in f.message]
         self.assertGreater(len(truncation_flags_hn), 0, "H&N scan should NOT tolerate 10mm lateral truncation")
+        self.assertEqual(result_hn.metrics["truncated_slices"], [3])
+        self.assertEqual(result_hn.metrics["tolerated_truncated_slices"], [])
 
         # 3. Test Pelvis/Prostate protocol (0 mm tolerance) -> Should reject
         paths_pelvis = self.create_ct_series(protocol="Pelvis Prostate", study_desc="Prostate Study")
@@ -122,6 +130,25 @@ thresholds:
         result_pelvis = self.engine.analyze_series(paths_pelvis)
         truncation_flags_pelvis = [f for f in result_pelvis.flags if "TRUNCATION_ERROR" in f.message]
         self.assertGreater(len(truncation_flags_pelvis), 0, "Pelvis scan should NOT tolerate 10mm lateral truncation")
+        self.assertEqual(result_pelvis.metrics["truncated_slices"], [3])
+        self.assertEqual(result_pelvis.metrics["tolerated_truncated_slices"], [])
+
+    def test_generate_pdf_report_with_tolerated_truncation(self):
+        paths_breast = self.create_ct_series(protocol="Breast Wingboard Scan", study_desc="Thorax Study")
+        ds = pydicom.dcmread(paths_breast[2])
+        pixels = np.frombuffer(ds.PixelData, dtype=np.uint16).copy().reshape((128, 128))
+        pixels[62:67, 0:10] = 924
+        ds.PixelData = pixels.tobytes()
+        ds.save_as(paths_breast[2], write_like_original=False)
+
+        result_breast = self.engine.analyze_series(paths_breast)
+
+        # Output path for test PDF report
+        report_path = os.path.join(self.test_dir, "test_report_breast.pdf")
+
+        # Verify PDF report generation compiles without error
+        generate_pdf_report(result_breast, report_path)
+        self.assertTrue(os.path.exists(report_path))
 
     def test_head_neck_posterior_table_exclusion(self):
         # Create a simulated table contact at the posterior edge (bottom: row 125 to 127)

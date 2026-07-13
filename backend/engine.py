@@ -209,6 +209,7 @@ class QAEngine:
         skin_threshold_hu = -200
         truncation_error = False
         truncated_slices = []
+        tolerated_truncated_slices = []
 
         for i, slice_data in enumerate(hu_volume):
             trunc_y, trunc_x = np.where((slice_data > skin_threshold_hu) & border_mask)
@@ -247,6 +248,8 @@ class QAEngine:
             if slice_truncated:
                 truncation_error = True
                 truncated_slices.append(i + 1)
+            else:
+                tolerated_truncated_slices.append(i + 1)
 
         # --- Agent: NoiseWhisperer ---
         # Logic: Crop 20x20px regions from the four extreme corners (Background Air).
@@ -490,6 +493,7 @@ class QAEngine:
             "metal_surface_slices": metal_surface_slices,
             "metal_external_slices": metal_external_slices,
             "truncated_slices": truncated_slices,
+            "tolerated_truncated_slices": tolerated_truncated_slices,
             "radon_roll_deg": roll_info["angle"],
             "radon_confidence": roll_info["confidence"],
             "radon_status": roll_info["status"],
