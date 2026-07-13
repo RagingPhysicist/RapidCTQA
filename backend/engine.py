@@ -181,7 +181,6 @@ class QAEngine:
         duplicate_slices = len(set(z_positions)) != len(z_positions)
         
         # --- Agent: GeometryGuardian ---
-        # Identify if this is a head/neck scan to ignore posterior table truncation
         study_desc = str(getattr(datasets[0], 'StudyDescription', '')).lower()
         protocol_lower = protocol.lower()
         body_part = str(getattr(datasets[0], 'BodyPartExamined', '')).lower()
@@ -189,23 +188,63 @@ class QAEngine:
         is_head_scan = any(term in study_desc or term in protocol_lower or term in body_part
                            for term in ['head', 'neck', 'brain', 'c-spine', 'cspine', 'cervical'])
 
-        # Logic: Scan image matrix perimeter. If count(edge_buffer > skin_threshold) >= 5 on any slice, trigger TRUNCATION_ERROR.
-        edge_buffer_px = 3
-        skin_threshold = -200
-        perimeter_mask = np.ones_like(hu_volume[0], dtype=bool)
-        perimeter_mask[edge_buffer_px:-edge_buffer_px, edge_buffer_px:-edge_buffer_px] = False
-        
+        # Standardise the protocol group
+        p_string = protocol.upper()
+        is_lenient_protocol = ("THORAX" in p_string or "CHEST" in p_string or "BREAST" in p_string)
+
+        _, H, W = hu_volume.shape
+        center_y, center_x = H // 2, W // 2
+
+        # Find any tissue touching the absolute outermost edge pixels (2 pixels wide border)
+        border_mask = np.zeros((H, W), dtype=bool)
+        border_mask[:2, :] = True
+        border_mask[-2:, :] = True
+        border_mask[:, :2] = True
+        border_mask[:, -2:] = True
+
+        # Preserve head/neck scan posterior table exception
         if is_head_scan:
-            # Mask out the posterior (bottom) edge to ignore the patient table
-            perimeter_mask[-edge_buffer_px:, :] = False
-        
-        # Check if any slice has non-air pixels touching the perimeter
+            border_mask[-2:, :] = False
+
+        skin_threshold_hu = -200
         truncation_error = False
         truncated_slices = []
+
         for i, slice_data in enumerate(hu_volume):
-            boundary_vals = slice_data[perimeter_mask]
-            # Use 5 pixels as a robust threshold to ignore isolated random noise
-            if np.sum(boundary_vals > skin_threshold) >= 5:
+            trunc_y, trunc_x = np.where((slice_data > skin_threshold_hu) & border_mask)
+            
+            # If no tissue (or fewer than 5 pixels to avoid noise) touches the border, the slice is clean
+            if len(trunc_y) < 5:
+                continue
+
+            # Convert the touching points to angles to see WHERE it is touching
+            angles_rad = np.arctan2(trunc_y - center_y, trunc_x - center_x)
+            angles_deg = np.degrees(angles_rad) % 360
+
+            critical_violation_found = False
+            lateral_violation_count = 0
+
+            for angle in angles_deg:
+                # Define the lateral arm sectors (9 to 10 o'clock and 2 to 3 o'clock regions)
+                is_right_lateral = (315.0 <= angle or angle <= 45.0)
+                is_left_lateral = (135.0 <= angle <= 225.0)
+
+                if is_right_lateral or is_left_lateral:
+                    lateral_violation_count += 1
+                else:
+                    # Tissue is touching the top (chest/chin) or bottom (back/couch)
+                    critical_violation_found = True
+                    break
+
+            # Apply Clinical Decision Rules
+            slice_truncated = False
+            if critical_violation_found:
+                slice_truncated = True
+            elif lateral_violation_count > 0:
+                if not is_lenient_protocol:
+                    slice_truncated = True
+
+            if slice_truncated:
                 truncation_error = True
                 truncated_slices.append(i + 1)
 
