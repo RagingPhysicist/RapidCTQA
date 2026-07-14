@@ -271,36 +271,7 @@ class QAEngine:
         center_roi = hu_volume[mid_z, mid_y-20:mid_y+20, mid_x-20:mid_x+20]
         center_noise_std = float(np.std(center_roi))
 
-        # --- Agent: FluidPhysicist ---
-        # Water/Fluid estimate (Soft tissue median)
-        body_mask = hu_volume > -500
-        water_hu_est = float(np.median(hu_volume[body_mask])) if np.any(body_mask) else 0.0
-        
-        # Specific Fluid (Bladder range)
-        fluid_pixels = hu_volume[(hu_volume >= 0) & (hu_volume <= 50) & body_mask]
-        fluid_median = float(np.median(fluid_pixels)) if fluid_pixels.size > 0 else -1000.0
-        
-        # --- Agent: CavityScout ---
-        voxel_vol = (float(datasets[0].PixelSpacing[0]) * float(datasets[0].PixelSpacing[1]) * float(datasets[0].SliceThickness)) / 1000.0
-        gas_voxels = (hu_volume < -500) & body_mask # Adjusted threshold to -500 HU
-        gas_volume_cc = float(np.sum(gas_voxels) * voxel_vol)
-        gas_slices = []
-        if gas_volume_cc > 0:
-            for i in range(hu_volume.shape[0]):
-                if np.any(gas_voxels[i]):
-                    gas_slices.append(i + 1)
-
-        # --- Agent: ImplantAuditor ---
-        # Build a per-slice filled body contour to accurately distinguish
-        # metal that is truly inside the patient from external markers or
-        # objects resting on the patient's skin (surface).
-        implant_cfg = self.config.get("thresholds", {}).get("implants", {})
-        metal_threshold = implant_cfg.get("metal_threshold_hu", 2000)
-        metal_vol_limit = implant_cfg.get("max_volume_cc", 0.05)
-
-        all_metal_voxels = hu_volume > metal_threshold
-
-        # Body/Interior masks
+        # --- Body/Interior masks (Pre-computed for ImplantAuditor & CavityScout) ---
         # 1. raw_body: Basic threshold to find patient + table
         # 2. patient_mask: Remove the table by keeping only the largest component
         # 3. interior_mask: Filled patient mask
@@ -329,6 +300,43 @@ class QAEngine:
 
         with ThreadPoolExecutor(max_workers=2) as pool:
             list(pool.map(_process_slice, range(hu_volume.shape[0])))
+
+        # --- Agent: FluidPhysicist ---
+        # Water/Fluid estimate (Soft tissue median)
+        body_mask = hu_volume > -500
+        water_hu_est = float(np.median(hu_volume[body_mask])) if np.any(body_mask) else 0.0
+
+        # Specific Fluid (Bladder range)
+        fluid_pixels = hu_volume[(hu_volume >= 0) & (hu_volume <= 50) & body_mask]
+        fluid_median = float(np.median(fluid_pixels)) if fluid_pixels.size > 0 else -1000.0
+
+        # --- Agent: CavityScout ---
+        is_thorax_scan = any(term in p_string or term in study_desc.upper() or term in body_part.upper()
+                             for term in ["THORAX", "CHEST", "BREAST", "LUNG"])
+
+        voxel_vol = (float(datasets[0].PixelSpacing[0]) * float(datasets[0].PixelSpacing[1]) * float(datasets[0].SliceThickness)) / 1000.0
+        gas_voxels = (hu_volume < -500) & interior_mask  # Use filled body mask to detect internal cavities
+        gas_volume_cc = float(np.sum(gas_voxels) * voxel_vol)
+
+        if is_thorax_scan:
+            gas_volume_cc = 0.0
+            gas_voxels = np.zeros_like(gas_voxels, dtype=bool)
+
+        gas_slices = []
+        if gas_volume_cc > 0:
+            for i in range(hu_volume.shape[0]):
+                if np.any(gas_voxels[i]):
+                    gas_slices.append(i + 1)
+
+        # --- Agent: ImplantAuditor ---
+        # Build a per-slice filled body contour to accurately distinguish
+        # metal that is truly inside the patient from external markers or
+        # objects resting on the patient's skin (surface).
+        implant_cfg = self.config.get("thresholds", {}).get("implants", {})
+        metal_threshold = implant_cfg.get("metal_threshold_hu", 2000)
+        metal_vol_limit = implant_cfg.get("max_volume_cc", 0.05)
+
+        all_metal_voxels = hu_volume > metal_threshold
 
         metal_internal = all_metal_voxels & shrunk_mask
         metal_surface = all_metal_voxels & interior_mask & ~shrunk_mask
