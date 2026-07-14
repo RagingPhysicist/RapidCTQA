@@ -452,7 +452,7 @@ async def viewer_info(series_uid: str):
     }
 
 
-def _render_slice_png(dcm_path: str, window_width: float, window_level: float, metal_threshold: float, reference_point: dict = None) -> bytes:
+def _render_slice_png(dcm_path: str, window_width: float, window_level: float, metal_threshold: float, reference_point: dict = None, show_mask: bool = False) -> bytes:
     """Render a single DICOM slice as a PNG byte stream with W/L and optional metal overlay."""
     ds = pydicom.dcmread(dcm_path)
     img = ds.pixel_array.astype(np.float32)
@@ -467,6 +467,22 @@ def _render_slice_png(dcm_path: str, window_width: float, window_level: float, m
 
     # Convert to RGB so we can draw a coloured metal overlay
     rgb = np.stack([img_norm, img_norm, img_norm], axis=-1)
+
+    # Patient mask overlay: show filled patient body contour as a light blue tint
+    if show_mask:
+        try:
+            import scipy.ndimage as ndimage
+            raw = img > -500
+            if np.any(raw):
+                labeled, num_features = ndimage.label(raw)
+                if num_features > 0:
+                    sizes = ndimage.sum(raw, labeled, range(num_features + 1))
+                    main_label = np.argmax(sizes[1:]) + 1
+                    patient_slice = (labeled == main_label)
+                    filled_mask = ndimage.binary_fill_holes(patient_slice)
+                    rgb[filled_mask] = (rgb[filled_mask].astype(np.float32) * 0.75 + np.array([50, 150, 250], dtype=np.float32) * 0.25).astype(np.uint8)
+        except Exception as e:
+            print(f"Error drawing patient mask: {e}")
 
     # Metal overlay: pixels above threshold -> red tint
     metal_mask = img > metal_threshold
@@ -512,6 +528,7 @@ async def viewer_slice(
     ww: float = Query(default=400.0),
     wl: float = Query(default=40.0),
     metal: bool = Query(default=True),
+    mask: bool = Query(default=False),
 ):
     """Return a single DICOM slice as a PNG image with W/L and metal overlay applied."""
     dicom_files = _get_series_ct_files(series_uid)
@@ -535,6 +552,7 @@ async def viewer_slice(
             wl,
             metal_threshold,
             reference_point,
+            mask,
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Slice render failed: {e}")

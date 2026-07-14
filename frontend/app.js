@@ -254,6 +254,7 @@ function refreshCockpitSlice() {
   const ww = document.getElementById('cockpit-ww').value;
   const wl = document.getElementById('cockpit-wl').value;
   const metal = document.getElementById('cockpit-metal-toggle').checked;
+  const mask = document.getElementById('cockpit-mask-toggle').checked;
 
   // Update slice label
   document.getElementById('cockpit-slice-label').textContent =
@@ -262,7 +263,7 @@ function refreshCockpitSlice() {
   // Sync nav slider
   document.getElementById('cockpit-nav-slider').value = sliceIndex;
 
-  const url = `${API_BASE}/viewer/${seriesUid}/slice/${sliceIndex}?ww=${ww}&wl=${wl}&metal=${metal}`;
+  const url = `${API_BASE}/viewer/${seriesUid}/slice/${sliceIndex}?ww=${ww}&wl=${wl}&metal=${metal}&mask=${mask}`;
   const loading = document.getElementById('cockpit-loading');
   loading.classList.add('visible');
 
