@@ -7,6 +7,60 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import List, Dict, Any, Optional
 from .models import QAResult, QAFlag
 
+def segment_patient_body_only(ct_volume, tissue_threshold_hu=-300):
+    """
+    Isolates the patient's body from the CT volume, completely excluding
+    the treatment table, wingboards, and immobilization devices.
+    """
+    # 1. Create initial binary tissue mask (includes body, couch, and devices)
+    initial_mask = ct_volume > tissue_threshold_hu
+
+    # 2. Fill small internal holes slice-by-slice (lungs, bowel gas) to make the body a solid mass.
+    # This prevents the body from breaking apart during erosion.
+    filled_mask = np.zeros_like(initial_mask)
+    if ct_volume.ndim == 3:
+        for i in range(initial_mask.shape[0]):
+            filled_mask[i] = ndimage.binary_fill_holes(initial_mask[i])
+    else:
+        filled_mask = ndimage.binary_fill_holes(initial_mask)
+
+    # 3. Apply Morphological Erosion
+    ndim = ct_volume.ndim
+    structuring_element = ndimage.generate_binary_structure(ndim, 1)
+    eroded_mask = ndimage.binary_erosion(filled_mask, structure=structuring_element, iterations=3)
+
+    # 4. Perform Connected Component Labeling
+    labeled_array, num_features = ndimage.label(eroded_mask)
+
+    target_mask = eroded_mask
+    if num_features == 0:
+        # Fallback if erosion was too aggressive for a tiny phantom
+        labeled_array, num_features = ndimage.label(filled_mask)
+        target_mask = filled_mask
+        if num_features == 0:
+            return np.zeros_like(filled_mask)
+
+    # 5. Find the ID of the largest connected component (the Patient)
+    component_sizes = ndimage.sum(target_mask, labeled_array, range(1, num_features + 1))
+    largest_component_id = np.argmax(component_sizes) + 1
+
+    # Isolate only the largest component
+    body_only_eroded = (labeled_array == largest_component_id)
+
+    # 6. Restore the patient's true skin boundary
+    # Dilate the isolated body mask back out by the exact same number of iterations
+    final_body_mask = ndimage.binary_dilation(body_only_eroded, structure=structuring_element, iterations=3)
+
+    # 7. Final pass to fill any internal voids left after reconstruction
+    final_body_mask_filled = np.zeros_like(final_body_mask)
+    if ct_volume.ndim == 3:
+        for i in range(final_body_mask.shape[0]):
+            final_body_mask_filled[i] = ndimage.binary_fill_holes(final_body_mask[i])
+    else:
+        final_body_mask_filled = ndimage.binary_fill_holes(final_body_mask)
+
+    return final_body_mask_filled
+
 class QAEngine:
     def __init__(self, config_path: str):
         with open(config_path, 'r') as f:
@@ -272,68 +326,14 @@ class QAEngine:
         center_noise_std = float(np.std(center_roi))
 
         # --- Body/Interior masks (Pre-computed for ImplantAuditor & CavityScout) ---
-        # 1. raw_body: Basic threshold to find patient + table
-        # 2. patient_mask: Remove the table by keeping only the largest component
-        # 3. interior_mask: Filled patient mask
-        # 4. shrunk_mask: interior_mask eroded to ignore skin-surface objects
-        patient_mask = np.zeros_like(hu_volume, dtype=bool)
+        # 1. interior_mask: Filled patient mask (excluding table, devices, couch)
+        # 2. shrunk_mask: interior_mask eroded to ignore skin-surface objects
+        interior_mask = segment_patient_body_only(hu_volume, tissue_threshold_hu=-300)
+
         shrunk_mask = np.zeros_like(hu_volume, dtype=bool)
-        interior_mask = np.zeros_like(hu_volume, dtype=bool)
-
-        # Morphological erosion disk (~10mm)
         erosion_px = int(10.0 / float(datasets[0].PixelSpacing[0]))
-
-        def _process_slice(i: int):
-            """Compute per-slice body masks; ndimage calls release the GIL."""
-            raw = hu_volume[i] > -500
-            if not np.any(raw):
-                return
-
-            # Step A: Sever thin connection between patient skin and couch/table using binary opening
-            opened = ndimage.binary_opening(raw, structure=np.ones((3, 3)))
-            labeled_op, num_features_op = ndimage.label(opened)
-
-            couch_mask = np.zeros_like(raw, dtype=bool)
-            rows, cols = raw.shape
-
-            if num_features_op > 0:
-                for c in range(1, num_features_op + 1):
-                    comp_mask = (labeled_op == c)
-                    y_idx, x_idx = np.where(comp_mask)
-                    if len(y_idx) > 0:
-                        ymin, ymax = y_idx.min(), y_idx.max()
-                        xmin, xmax = x_idx.min(), x_idx.max()
-                        h = ymax - ymin + 1
-                        w = xmax - xmin + 1
-
-                        # Spatial heuristic to identify table/couch:
-                        # located at bottom, wide, and flat aspect ratio
-                        if ymax > rows * 0.75 and w > cols * 0.4 and w > 2.0 * h:
-                            couch_mask |= comp_mask
-
-            # Step B: Exclude the couch/table from the raw thresholded mask
-            patient_raw = raw & ~couch_mask
-
-            # Step C: Retain all significant patient components (e.g. both legs, torso, arms)
-            labeled_pat, num_pat = ndimage.label(patient_raw)
-            patient_slice = np.zeros_like(raw, dtype=bool)
-
-            if num_pat > 0:
-                sizes = ndimage.sum(patient_raw, labeled_pat, range(num_pat + 1))
-                max_size = np.max(sizes[1:])
-                for pat_id in range(1, num_pat + 1):
-                    # Filter out tiny noise (keep components > 50 pixels or > 0.5% of the largest component)
-                    if sizes[pat_id] > max(50, 0.005 * max_size):
-                        patient_slice |= (labeled_pat == pat_id)
-
-            if np.any(patient_slice):
-                patient_mask[i] = patient_slice
-                filled = ndimage.binary_fill_holes(patient_slice)
-                interior_mask[i] = filled
-                shrunk_mask[i] = ndimage.binary_erosion(filled, iterations=erosion_px)
-
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            list(pool.map(_process_slice, range(hu_volume.shape[0])))
+        for i in range(hu_volume.shape[0]):
+            shrunk_mask[i] = ndimage.binary_erosion(interior_mask[i], iterations=erosion_px)
 
         # --- Agent: FluidPhysicist ---
         # Water/Fluid estimate (Soft tissue median)
