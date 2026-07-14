@@ -186,17 +186,17 @@ thresholds:
         self.assertGreater(len(truncation_flags_pelvis), 0, "Pelvis scan should not ignore posterior table contact")
 
     def test_cavity_scout_gas_detection(self):
-        # 1. Test moderate gas volume (~19.6 cc) on pelvic scan -> Should be CONDITIONAL
-        paths_pelvis_mod = self.create_ct_series(protocol="Pelvis Prostate", study_desc="Prostate Study")
+        # 1. Test moderate gas volume on pelvic scan (lower 50% only) -> Should be CONDITIONAL
+        paths_pelvis_mod = self.create_ct_series(protocol="Pelvis Prostate", study_desc="Prostate Study", num_slices=10, pixel_spacing=[1.5, 1.5])
         for path in paths_pelvis_mod:
             ds = pydicom.dcmread(path)
             pixels = np.frombuffer(ds.PixelData, dtype=np.uint16).copy().reshape((128, 128))
             y, x = np.ogrid[:128, :128]
             # Body contour
-            body_mask = (x - 64)**2 + (y - 64)**2 <= 40**2
+            body_mask = (x - 64)**2 + (y - 64)**2 <= 24**2
             pixels[body_mask] = 924
-            # Moderate gas cavity (radius 25 -> ~19.6 cc)
-            cavity_mask = (x - 64)**2 + (y - 64)**2 <= 25**2
+            # Moderate gas cavity (radius 16 -> ~18.1 cc across lower 5 slices)
+            cavity_mask = (x - 64)**2 + (y - 64)**2 <= 16**2
             pixels[cavity_mask] = 24
             ds.PixelData = pixels.tobytes()
             ds.save_as(path, write_like_original=False)
@@ -209,17 +209,17 @@ thresholds:
         self.assertEqual(len(gas_flags_mod), 1)
         self.assertEqual(gas_flags_mod[0].status, "CONDITIONAL")
 
-        # 2. Test excessive gas volume (~50.3 cc) on pelvic scan -> Should be REJECT
-        paths_pelvis_exc = self.create_ct_series(protocol="Pelvis Prostate", study_desc="Prostate Study")
+        # 2. Test excessive gas volume on pelvic scan (lower 50% only) -> Should be REJECT
+        paths_pelvis_exc = self.create_ct_series(protocol="Pelvis Prostate", study_desc="Prostate Study", num_slices=10, pixel_spacing=[1.5, 1.5])
         for path in paths_pelvis_exc:
             ds = pydicom.dcmread(path)
             pixels = np.frombuffer(ds.PixelData, dtype=np.uint16).copy().reshape((128, 128))
             y, x = np.ogrid[:128, :128]
-            # Body contour (radius 48)
-            body_mask = (x - 64)**2 + (y - 64)**2 <= 48**2
+            # Body contour (radius 36)
+            body_mask = (x - 64)**2 + (y - 64)**2 <= 36**2
             pixels[body_mask] = 924
-            # Excessive gas cavity (radius 40 -> ~50.3 cc)
-            cavity_mask = (x - 64)**2 + (y - 64)**2 <= 40**2
+            # Excessive gas cavity (radius 28 -> ~55.4 cc across lower 5 slices)
+            cavity_mask = (x - 64)**2 + (y - 64)**2 <= 28**2
             pixels[cavity_mask] = 24
             ds.PixelData = pixels.tobytes()
             ds.save_as(path, write_like_original=False)
@@ -232,16 +232,16 @@ thresholds:
         self.assertEqual(gas_flags_exc[0].status, "REJECT")
 
         # 3. Test thoracic scan bypass -> Gas volume should be 0.0 and no CavityScout flags
-        paths_thorax = self.create_ct_series(protocol="Thorax Lung Scan", study_desc="Chest Thorax")
+        paths_thorax = self.create_ct_series(protocol="Thorax Lung Scan", study_desc="Chest Thorax", num_slices=10, pixel_spacing=[1.5, 1.5])
         for path in paths_thorax:
             ds = pydicom.dcmread(path)
             pixels = np.frombuffer(ds.PixelData, dtype=np.uint16).copy().reshape((128, 128))
             y, x = np.ogrid[:128, :128]
             # Body contour
-            body_mask = (x - 64)**2 + (y - 64)**2 <= 40**2
+            body_mask = (x - 64)**2 + (y - 64)**2 <= 24**2
             pixels[body_mask] = 924
             # Gas cavity
-            cavity_mask = (x - 64)**2 + (y - 64)**2 <= 25**2
+            cavity_mask = (x - 64)**2 + (y - 64)**2 <= 16**2
             pixels[cavity_mask] = 24
             ds.PixelData = pixels.tobytes()
             ds.save_as(path, write_like_original=False)

@@ -6,100 +6,7 @@ import os
 from concurrent.futures import ThreadPoolExecutor
 from typing import List, Dict, Any, Optional
 from .models import QAResult, QAFlag
-
-def segment_patient_body_only(ct_volume, tissue_threshold_hu=-300):
-    """
-    Isolates the patient's body from the CT volume, completely excluding
-    the treatment table, wingboards, and immobilization devices.
-    """
-    # Pre-clean table slice-by-slice before running robust segmentation
-    cleaned_volume = np.copy(ct_volume)
-
-    def _pre_clean_slice(slice_data):
-        raw = slice_data > -500
-        if not np.any(raw):
-            return slice_data
-
-        # Binary opening with a 3x3 structuring element to isolate couch
-        opened = ndimage.binary_opening(raw, structure=np.ones((3, 3)))
-        labeled_op, num_features_op = ndimage.label(opened)
-
-        couch_mask = np.zeros_like(raw, dtype=bool)
-        rows, cols = raw.shape
-
-        if num_features_op > 0:
-            for c in range(1, num_features_op + 1):
-                comp_mask = (labeled_op == c)
-                y_idx, x_idx = np.where(comp_mask)
-                if len(y_idx) > 0:
-                    ymin, ymax = y_idx.min(), y_idx.max()
-                    xmin, xmax = x_idx.min(), x_idx.max()
-                    h = ymax - ymin + 1
-                    w = xmax - xmin + 1
-
-                    # Spatial heuristic to identify table/couch:
-                    # located at bottom, wide, and flat aspect ratio
-                    if ymax > rows * 0.75 and w > cols * 0.4 and w > 2.0 * h:
-                        couch_mask |= comp_mask
-
-        slice_cleaned = np.copy(slice_data)
-        slice_cleaned[couch_mask] = -1000.0
-        return slice_cleaned
-
-    if ct_volume.ndim == 3:
-        for i in range(cleaned_volume.shape[0]):
-            cleaned_volume[i] = _pre_clean_slice(cleaned_volume[i])
-    else:
-        cleaned_volume = _pre_clean_slice(cleaned_volume)
-
-    # 1. Create initial binary tissue mask (includes body, table is pre-cleaned)
-    initial_mask = cleaned_volume > tissue_threshold_hu
-
-    # 2. Fill small internal holes slice-by-slice (lungs, bowel gas) to make the body a solid mass.
-    # This prevents the body from breaking apart during erosion.
-    filled_mask = np.zeros_like(initial_mask)
-    if ct_volume.ndim == 3:
-        for i in range(initial_mask.shape[0]):
-            filled_mask[i] = ndimage.binary_fill_holes(initial_mask[i])
-    else:
-        filled_mask = ndimage.binary_fill_holes(initial_mask)
-
-    # 3. Apply Morphological Erosion
-    ndim = ct_volume.ndim
-    structuring_element = ndimage.generate_binary_structure(ndim, 1)
-    eroded_mask = ndimage.binary_erosion(filled_mask, structure=structuring_element, iterations=3)
-
-    # 4. Perform Connected Component Labeling
-    labeled_array, num_features = ndimage.label(eroded_mask)
-
-    target_mask = eroded_mask
-    if num_features == 0:
-        # Fallback if erosion was too aggressive for a tiny phantom
-        labeled_array, num_features = ndimage.label(filled_mask)
-        target_mask = filled_mask
-        if num_features == 0:
-            return np.zeros_like(filled_mask)
-
-    # 5. Find the ID of the largest connected component (the Patient)
-    component_sizes = ndimage.sum(target_mask, labeled_array, range(1, num_features + 1))
-    largest_component_id = np.argmax(component_sizes) + 1
-
-    # Isolate only the largest component
-    body_only_eroded = (labeled_array == largest_component_id)
-
-    # 6. Restore the patient's true skin boundary
-    # Dilate the isolated body mask back out by the exact same number of iterations
-    final_body_mask = ndimage.binary_dilation(body_only_eroded, structure=structuring_element, iterations=3)
-
-    # 7. Final pass to fill any internal voids left after reconstruction
-    final_body_mask_filled = np.zeros_like(final_body_mask)
-    if ct_volume.ndim == 3:
-        for i in range(final_body_mask.shape[0]):
-            final_body_mask_filled[i] = ndimage.binary_fill_holes(final_body_mask[i])
-    else:
-        final_body_mask_filled = ndimage.binary_fill_holes(final_body_mask)
-
-    return final_body_mask_filled
+from backend.utils import segment_patient_body_only
 
 class QAEngine:
     def __init__(self, config_path: str):
@@ -385,22 +292,31 @@ class QAEngine:
         fluid_median = float(np.median(fluid_pixels)) if fluid_pixels.size > 0 else -1000.0
 
         # --- Agent: CavityScout ---
-        is_thorax_scan = any(term in p_string or term in study_desc.upper() or term in body_part.upper()
-                             for term in ["THORAX", "CHEST", "BREAST", "LUNG"])
+        is_pelvis_or_abdomen_scan = any(term in p_string or term in study_desc.upper() or term in body_part.upper()
+                                        for term in ["PELVIS", "PROSTATE", "ABD", "ABDOMEN", "RECTUM", "GYN", "PELVIC"])
 
         voxel_vol = (float(datasets[0].PixelSpacing[0]) * float(datasets[0].PixelSpacing[1]) * float(datasets[0].SliceThickness)) / 1000.0
-        gas_voxels = (hu_volume < -500) & interior_mask  # Use filled body mask to detect internal cavities
-        gas_volume_cc = float(np.sum(gas_voxels) * voxel_vol)
 
-        if is_thorax_scan:
-            gas_volume_cc = 0.0
-            gas_voxels = np.zeros_like(gas_voxels, dtype=bool)
-
+        gas_voxels = np.zeros_like(hu_volume, dtype=bool)
+        gas_volume_cc = 0.0
         gas_slices = []
-        if gas_volume_cc > 0:
-            for i in range(hu_volume.shape[0]):
-                if np.any(gas_voxels[i]):
-                    gas_slices.append(i + 1)
+
+        if is_pelvis_or_abdomen_scan:
+            # Only calculate gas within the lower (inferior-most) 50% of the slices along the Z-axis
+            num_slices = hu_volume.shape[0]
+            lower_body_slice_limit = max(1, num_slices // 2)
+
+            # Create a 3D mask of lower body slices
+            lower_body_mask = np.zeros_like(hu_volume, dtype=bool)
+            lower_body_mask[:lower_body_slice_limit, :, :] = True
+
+            gas_voxels = (hu_volume < -500) & interior_mask & lower_body_mask
+            gas_volume_cc = float(np.sum(gas_voxels) * voxel_vol)
+
+            if gas_volume_cc > 0:
+                for i in range(hu_volume.shape[0]):
+                    if np.any(gas_voxels[i]):
+                        gas_slices.append(i + 1)
 
         # --- Agent: ImplantAuditor ---
         # Build a per-slice filled body contour to accurately distinguish
