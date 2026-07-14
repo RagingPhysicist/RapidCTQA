@@ -288,11 +288,45 @@ class QAEngine:
             raw = hu_volume[i] > -500
             if not np.any(raw):
                 return
-            labeled, num_features = ndimage.label(raw)
-            if num_features > 0:
-                sizes = ndimage.sum(raw, labeled, range(num_features + 1))
-                main_label = np.argmax(sizes[1:]) + 1
-                patient_slice = (labeled == main_label)
+
+            # Step A: Sever thin connection between patient skin and couch/table using binary opening
+            opened = ndimage.binary_opening(raw, structure=np.ones((3, 3)))
+            labeled_op, num_features_op = ndimage.label(opened)
+
+            couch_mask = np.zeros_like(raw, dtype=bool)
+            rows, cols = raw.shape
+
+            if num_features_op > 0:
+                for c in range(1, num_features_op + 1):
+                    comp_mask = (labeled_op == c)
+                    y_idx, x_idx = np.where(comp_mask)
+                    if len(y_idx) > 0:
+                        ymin, ymax = y_idx.min(), y_idx.max()
+                        xmin, xmax = x_idx.min(), x_idx.max()
+                        h = ymax - ymin + 1
+                        w = xmax - xmin + 1
+
+                        # Spatial heuristic to identify table/couch:
+                        # located at bottom, wide, and flat aspect ratio
+                        if ymax > rows * 0.75 and w > cols * 0.4 and w > 2.0 * h:
+                            couch_mask |= comp_mask
+
+            # Step B: Exclude the couch/table from the raw thresholded mask
+            patient_raw = raw & ~couch_mask
+
+            # Step C: Retain all significant patient components (e.g. both legs, torso, arms)
+            labeled_pat, num_pat = ndimage.label(patient_raw)
+            patient_slice = np.zeros_like(raw, dtype=bool)
+
+            if num_pat > 0:
+                sizes = ndimage.sum(patient_raw, labeled_pat, range(num_pat + 1))
+                max_size = np.max(sizes[1:])
+                for pat_id in range(1, num_pat + 1):
+                    # Filter out tiny noise (keep components > 50 pixels or > 0.5% of the largest component)
+                    if sizes[pat_id] > max(50, 0.005 * max_size):
+                        patient_slice |= (labeled_pat == pat_id)
+
+            if np.any(patient_slice):
                 patient_mask[i] = patient_slice
                 filled = ndimage.binary_fill_holes(patient_slice)
                 interior_mask[i] = filled
