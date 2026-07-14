@@ -12,8 +12,48 @@ def segment_patient_body_only(ct_volume, tissue_threshold_hu=-300):
     Isolates the patient's body from the CT volume, completely excluding
     the treatment table, wingboards, and immobilization devices.
     """
-    # 1. Create initial binary tissue mask (includes body, couch, and devices)
-    initial_mask = ct_volume > tissue_threshold_hu
+    # Pre-clean table slice-by-slice before running robust segmentation
+    cleaned_volume = np.copy(ct_volume)
+
+    def _pre_clean_slice(slice_data):
+        raw = slice_data > -500
+        if not np.any(raw):
+            return slice_data
+
+        # Binary opening with a 3x3 structuring element to isolate couch
+        opened = ndimage.binary_opening(raw, structure=np.ones((3, 3)))
+        labeled_op, num_features_op = ndimage.label(opened)
+
+        couch_mask = np.zeros_like(raw, dtype=bool)
+        rows, cols = raw.shape
+
+        if num_features_op > 0:
+            for c in range(1, num_features_op + 1):
+                comp_mask = (labeled_op == c)
+                y_idx, x_idx = np.where(comp_mask)
+                if len(y_idx) > 0:
+                    ymin, ymax = y_idx.min(), y_idx.max()
+                    xmin, xmax = x_idx.min(), x_idx.max()
+                    h = ymax - ymin + 1
+                    w = xmax - xmin + 1
+
+                    # Spatial heuristic to identify table/couch:
+                    # located at bottom, wide, and flat aspect ratio
+                    if ymax > rows * 0.75 and w > cols * 0.4 and w > 2.0 * h:
+                        couch_mask |= comp_mask
+
+        slice_cleaned = np.copy(slice_data)
+        slice_cleaned[couch_mask] = -1000.0
+        return slice_cleaned
+
+    if ct_volume.ndim == 3:
+        for i in range(cleaned_volume.shape[0]):
+            cleaned_volume[i] = _pre_clean_slice(cleaned_volume[i])
+    else:
+        cleaned_volume = _pre_clean_slice(cleaned_volume)
+
+    # 1. Create initial binary tissue mask (includes body, table is pre-cleaned)
+    initial_mask = cleaned_volume > tissue_threshold_hu
 
     # 2. Fill small internal holes slice-by-slice (lungs, bowel gas) to make the body a solid mass.
     # This prevents the body from breaking apart during erosion.
