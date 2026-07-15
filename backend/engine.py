@@ -23,8 +23,16 @@ class QAEngine:
         except ImportError:
             return {"status": "SKIPPED", "angle": 0.0, "confidence": 0.0, "message": "scikit-image not installed"}
 
-        # 1. Clean background noise to isolate the structural mass
-        clean_array = np.copy(pixel_array)
+        # 1. Clean background noise and treatment couch/accessories to isolate ONLY the patient's structural mass
+        try:
+            from backend.utils import segment_patient_body_only
+            body_mask = segment_patient_body_only(pixel_array, tissue_threshold_hu=hu_threshold)
+            clean_array = np.copy(pixel_array)
+            # Set non-patient pixels to background so they are cleaned uniformly
+            clean_array[~body_mask] = -1000.0
+        except Exception as e:
+            clean_array = np.copy(pixel_array)
+
         clean_array[clean_array < hu_threshold] = hu_threshold
 
         # 2. Compute Radon projections around the vertical axis (90 degrees)
@@ -603,8 +611,6 @@ class QAEngine:
         if metrics.get("radon_status") != "SKIPPED":
             if abs(metrics["radon_roll_deg"]) > align_limit and metrics["radon_confidence"] > 0.95:
                 flags.append(QAFlag(name="AlignmentAuditor", status="CONDITIONAL", message=f"ROLL_ALERT: Patient rotation detected ({metrics['radon_roll_deg']:.2f}°, Confidence: {metrics['radon_confidence']:.2%})"))
-        if abs(metrics["radon_roll_deg"]) > align_limit and metrics["radon_confidence"] > 0.95:
-            flags.append(QAFlag(name="AlignmentAuditor", status="CONDITIONAL", message=f"ROLL_ALERT: Patient rotation detected ({metrics['radon_roll_deg']:.2f}°, Confidence: {metrics['radon_confidence']:.2%})"))
 
         # --- Integrity (Shared/Lead Oversight) ---
         if metrics["pediatric_mismatch"]:
