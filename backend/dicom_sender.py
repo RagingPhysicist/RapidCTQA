@@ -15,7 +15,7 @@ def get_destinations():
             return []
             
     try:
-        with open(dest_path, "r") as f:
+        with open(dest_path, "r", encoding="utf-8") as f:
             data = json.load(f)
         return [dest for dest in data.get("dicom_destinations", []) if dest.get("is_active", False)]
     except Exception as e:

@@ -9,7 +9,7 @@ from .models import QAResult, QAFlag
 
 class QAEngine:
     def __init__(self, config_path: str):
-        with open(config_path, 'r') as f:
+        with open(config_path, 'r', encoding="utf-8") as f:
             self.config = yaml.safe_load(f)
 
     def _determine_true_patient_roll(self, pixel_array, hu_threshold=-300, angular_resolution=0.1):

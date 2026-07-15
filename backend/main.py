@@ -36,7 +36,7 @@ except ImportError:
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # Load webApp configuration
-with open(os.path.join(ROOT_DIR, "webApp.yaml"), "r") as f:
+with open(os.path.join(ROOT_DIR, "webApp.yaml"), "r", encoding="utf-8") as f:
     config_web = yaml.safe_load(f)
 
 app = FastAPI(title="RapidCTQA API")
@@ -169,7 +169,7 @@ def on_series_received(series_uid: str):
         # Save to disk
         cache_file = os.path.join(study_path, "qa_result.json")
         try:
-            with open(cache_file, "w") as f:
+            with open(cache_file, "w", encoding="utf-8") as f:
                 f.write(result.json())
             print(f"Cached result saved to disk: {cache_file}")
         except Exception as e:
@@ -209,7 +209,7 @@ def _load_persisted_results():
         cache_file = os.path.join(study_path, "qa_result.json")
         if os.path.exists(cache_file):
             try:
-                with open(cache_file, "r") as f:
+                with open(cache_file, "r", encoding="utf-8") as f:
                     data = json.load(f)
                 with results_cache_lock:
                     results_cache[entry] = QAResult(**data)
@@ -404,7 +404,7 @@ async def viewer_info(series_uid: str):
     wl_presets = {}
     wl_path = os.path.join(ROOT_DIR, "WL.json")
     try:
-        with open(wl_path) as f:
+        with open(wl_path, encoding="utf-8") as f:
             wl_presets = json.load(f).get("ct_window_level_presets", {})
     except Exception:
         pass
@@ -588,7 +588,7 @@ async def reject_series(series_uid: str):
 
         # 5. Log rejection
         log_path = os.path.join(ROOT_DIR, "rejections.log")
-        with open(log_path, "a") as f:
+        with open(log_path, "a", encoding="utf-8") as f:
             f.write(f"{datetime.now().isoformat()} - {series_uid} rejected and deleted\n")
 
         return {"message": f"{series_uid} rejected"}

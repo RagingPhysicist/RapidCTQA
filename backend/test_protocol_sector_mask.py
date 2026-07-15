@@ -12,7 +12,7 @@ class TestProtocolSectorMask(unittest.TestCase):
     def setUp(self):
         # Create a minimal config for QAEngine
         self.config_path = "test_ctqa_sector.yaml"
-        with open(self.config_path, "w") as f:
+        with open(self.config_path, "w", encoding="utf-8") as f:
             f.write("""
 thresholds:
   implants:
