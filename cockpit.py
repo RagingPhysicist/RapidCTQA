@@ -49,7 +49,7 @@ def normalise_storage_path(path: str) -> str:
     return path
 
 try:
-    with open("webApp.yaml", "r") as f:
+    with open("webApp.yaml", "r", encoding="utf-8") as f:
         config_web = yaml.safe_load(f)
 
     raw_storage_path = config_web.get("backend", {}).get("storage", {}).get("path", "")
@@ -65,7 +65,7 @@ except Exception as e:
     STORAGE_DIR = "./data/rtct"
 
 try:
-    with open("ctqa.yaml", "r") as f:
+    with open("ctqa.yaml", "r", encoding="utf-8") as f:
         config_ctqa = yaml.safe_load(f)
     METAL_THRESHOLD = config_ctqa.get("thresholds", {}).get("implants", {}).get("metal_threshold_hu", 2000)
 except Exception:
@@ -161,7 +161,7 @@ class ClinicalTriageApp(ctk.CTk):
         
         # Load WL Presets
         try:
-            with open("WL.json", "r") as f:
+            with open("WL.json", "r", encoding="utf-8") as f:
                 self.wl_presets = json.load(f)["ct_window_level_presets"]
         except Exception as e:
             print(f"Error loading WL.json: {e}")
@@ -327,7 +327,7 @@ class ClinicalTriageApp(ctk.CTk):
         if self.current_series_path:
             self.status_lbl.configure(text="REJECTED - NOTIFIED", text_color="#dc3545")
             # Log rejection
-            with open("rejections.log", "a") as f:
+            with open("rejections.log", "a", encoding="utf-8") as f:
                 f.write(f"{self.current_series_uid} rejected\n")
             self.current_series_path = None
             self.flag_box.delete("0.0", "end")
