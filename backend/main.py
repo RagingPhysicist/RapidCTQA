@@ -405,7 +405,7 @@ async def viewer_info(series_uid: str):
     wl_presets = {}
     wl_path = os.path.join(ROOT_DIR, "WL.json")
     try:
-        with open(wl_path, encoding="utf-8") as f:
+        with open(wl_path, "r", encoding="utf-8") as f:
             wl_presets = json.load(f).get("ct_window_level_presets", {})
     except Exception:
         pass
