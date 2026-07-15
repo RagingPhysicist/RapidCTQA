@@ -192,11 +192,11 @@ thresholds:
             ds = pydicom.dcmread(path)
             pixels = np.frombuffer(ds.PixelData, dtype=np.uint16).copy().reshape((128, 128))
             y, x = np.ogrid[:128, :128]
-            # Body contour
-            body_mask = (x - 64)**2 + (y - 64)**2 <= 24**2
+            # Body contour (radius 32)
+            body_mask = (x - 64)**2 + (y - 64)**2 <= 32**2
             pixels[body_mask] = 924
-            # Moderate gas cavity (radius 16 -> ~18.1 cc across lower 5 slices)
-            cavity_mask = (x - 64)**2 + (y - 64)**2 <= 16**2
+            # Moderate gas cavity (radius 22 -> ~34.2 cc across lower 5 slices)
+            cavity_mask = (x - 64)**2 + (y - 64)**2 <= 22**2
             pixels[cavity_mask] = 24
             ds.PixelData = pixels.tobytes()
             ds.save_as(path, write_like_original=False)
@@ -208,6 +208,7 @@ thresholds:
         gas_flags_mod = [f for f in result_mod.flags if f.name == "CavityScout"]
         self.assertEqual(len(gas_flags_mod), 1)
         self.assertEqual(gas_flags_mod[0].status, "CONDITIONAL")
+        self.assertNotIn("SEGMENTATION_LEAK", gas_flags_mod[0].message)
 
         # 2. Test excessive gas volume on pelvic scan (lower 50% only) -> Should be REJECT
         paths_pelvis_exc = self.create_ct_series(protocol="Pelvis Prostate", study_desc="Prostate Study", num_slices=10, pixel_spacing=[1.5, 1.5])
@@ -215,23 +216,48 @@ thresholds:
             ds = pydicom.dcmread(path)
             pixels = np.frombuffer(ds.PixelData, dtype=np.uint16).copy().reshape((128, 128))
             y, x = np.ogrid[:128, :128]
-            # Body contour (radius 36)
-            body_mask = (x - 64)**2 + (y - 64)**2 <= 36**2
+            # Body contour (radius 48)
+            body_mask = (x - 64)**2 + (y - 64)**2 <= 48**2
             pixels[body_mask] = 924
-            # Excessive gas cavity (radius 28 -> ~55.4 cc across lower 5 slices)
-            cavity_mask = (x - 64)**2 + (y - 64)**2 <= 28**2
+            # Excessive gas cavity (radius 32 -> ~68.4 cc across lower 5 slices)
+            cavity_mask = (x - 64)**2 + (y - 64)**2 <= 32**2
             pixels[cavity_mask] = 24
             ds.PixelData = pixels.tobytes()
             ds.save_as(path, write_like_original=False)
 
         result_exc = self.engine.analyze_series(paths_pelvis_exc)
         self.assertGreater(result_exc.metrics["gas_volume_cc"], 50.0)
+        self.assertLessEqual(result_exc.metrics["gas_volume_cc"], 100.0)
 
         gas_flags_exc = [f for f in result_exc.flags if f.name == "CavityScout"]
         self.assertEqual(len(gas_flags_exc), 1)
         self.assertEqual(gas_flags_exc[0].status, "REJECT")
+        self.assertNotIn("SEGMENTATION_LEAK", gas_flags_exc[0].message)
 
-        # 3. Test thoracic scan bypass -> Gas volume should be 0.0 and no CavityScout flags
+        # 3. Test massive gas volume (>100 cc) on pelvic scan -> Should trigger SEGMENTATION_LEAK
+        paths_pelvis_leak = self.create_ct_series(protocol="Pelvis Prostate", study_desc="Prostate Study", num_slices=10, pixel_spacing=[1.5, 1.5])
+        for path in paths_pelvis_leak:
+            ds = pydicom.dcmread(path)
+            pixels = np.frombuffer(ds.PixelData, dtype=np.uint16).copy().reshape((128, 128))
+            y, x = np.ogrid[:128, :128]
+            # Body contour (radius 60)
+            body_mask = (x - 64)**2 + (y - 64)**2 <= 60**2
+            pixels[body_mask] = 924
+            # Massive gas cavity (radius 46 -> ~149 cc across lower 5 slices)
+            cavity_mask = (x - 64)**2 + (y - 64)**2 <= 46**2
+            pixels[cavity_mask] = 24
+            ds.PixelData = pixels.tobytes()
+            ds.save_as(path, write_like_original=False)
+
+        result_leak = self.engine.analyze_series(paths_pelvis_leak)
+        self.assertGreater(result_leak.metrics["gas_volume_cc"], 100.0)
+
+        gas_flags_leak = [f for f in result_leak.flags if f.name == "CavityScout"]
+        self.assertEqual(len(gas_flags_leak), 1)
+        self.assertEqual(gas_flags_leak[0].status, "REJECT")
+        self.assertIn("SEGMENTATION_LEAK", gas_flags_leak[0].message)
+
+        # 4. Test thoracic scan bypass -> Gas volume should be 0.0 and no CavityScout flags
         paths_thorax = self.create_ct_series(protocol="Thorax Lung Scan", study_desc="Chest Thorax", num_slices=10, pixel_spacing=[1.5, 1.5])
         for path in paths_thorax:
             ds = pydicom.dcmread(path)

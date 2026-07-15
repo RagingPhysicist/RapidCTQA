@@ -310,15 +310,53 @@ class QAEngine:
         gas_slices = []
 
         if is_pelvis_or_abdomen_scan:
+            # Scale 1.5 cm (15.0 mm) to pixels based on vertical spacing
+            pixel_spacing_y = float(datasets[0].PixelSpacing[1])
+            cutoff_pixels = int(15.0 / pixel_spacing_y)
+
             # Only calculate gas within the lower (inferior-most) 50% of the slices along the Z-axis
             num_slices = hu_volume.shape[0]
             lower_body_slice_limit = max(1, num_slices // 2)
 
-            # Create a 3D mask of lower body slices
-            lower_body_mask = np.zeros_like(hu_volume, dtype=bool)
-            lower_body_mask[:lower_body_slice_limit, :, :] = True
+            for i in range(lower_body_slice_limit):
+                # 1. Compute 2D internal air (entirely surrounded by tissue) using -800 HU threshold
+                tissue_mask_slice = (hu_volume[i] >= -800)
+                filled_tissue = ndimage.binary_fill_holes(tissue_mask_slice)
+                internal_air_slice = filled_tissue & ~tissue_mask_slice
 
-            gas_voxels = (hu_volume < -500) & interior_mask & lower_body_mask
+                # 2. Exclude bottom 1.5 cm of the patient mask (near couch interface)
+                y_indices = np.where(interior_mask[i])[0]
+                if y_indices.size > 0:
+                    ymax_patient = y_indices.max()
+                    y_cutoff = max(0, ymax_patient - cutoff_pixels)
+                    search_mask = np.copy(interior_mask[i])
+                    search_mask[y_cutoff:, :] = False
+                    internal_air_slice = internal_air_slice & search_mask
+                else:
+                    internal_air_slice = np.zeros_like(internal_air_slice, dtype=bool)
+
+                # 3. Anatomical Volume Gating: ignore any components leaking/pathway on adjacent slices
+                labeled_air, num_air_feats = ndimage.label(internal_air_slice)
+                gated_air_slice = np.zeros_like(internal_air_slice, dtype=bool)
+
+                for c in range(1, num_air_feats + 1):
+                    comp = (labeled_air == c)
+
+                    # Check leakage to i-1
+                    leak_prev = False
+                    if i > 0:
+                        leak_prev = np.any(comp & ~interior_mask[i-1])
+
+                    # Check leakage to i+1
+                    leak_next = False
+                    if i < num_slices - 1:
+                        leak_next = np.any(comp & ~interior_mask[i+1])
+
+                    if not (leak_prev or leak_next):
+                        gated_air_slice |= comp
+
+                gas_voxels[i] = gated_air_slice
+
             gas_volume_cc = float(np.sum(gas_voxels) * voxel_vol)
 
             if gas_volume_cc > 0:
@@ -509,6 +547,7 @@ class QAEngine:
             "rescale_slope": rescale_slope,
             "marker_detected": len(marker_slices) > 0,
             "marker_slices": marker_slices,
+            "is_pelvis_or_abdomen_scan": is_pelvis_or_abdomen_scan,
         }
         return metrics
 
@@ -586,7 +625,9 @@ class QAEngine:
         # --- CavityScout Responsibilities ---
         if metrics["gas_volume_cc"] > 15.0:
             slice_info = self._format_slices(metrics.get("gas_slices", []))
-            if metrics["gas_volume_cc"] > 50.0:
+            if metrics.get("is_pelvis_or_abdomen_scan") and metrics["gas_volume_cc"] > 100.0:
+                flags.append(QAFlag(name="CavityScout", status="REJECT", message=f"SEGMENTATION_LEAK: Massive non-physiological air volume detected ({metrics['gas_volume_cc']:.1f} cc){slice_info}"))
+            elif metrics["gas_volume_cc"] > 50.0:
                 flags.append(QAFlag(name="CavityScout", status="REJECT", message=f"Excessive gas volume ({metrics['gas_volume_cc']:.1f} cc){slice_info}"))
             else:
                 flags.append(QAFlag(name="CavityScout", status="CONDITIONAL", message=f"Moderate gas volume ({metrics['gas_volume_cc']:.1f} cc){slice_info}"))
