@@ -43,9 +43,9 @@ agents:
     role: "Air & Gas Auditor"
     description: "Detects large air pockets in bowel or stomach that impact dosimetry."
     parameters:
-      air_threshold: -700
+      air_threshold: -800
       max_gas_volume_cc: 15.0
-    logic: "Isolate voxels < -700 inside body mask. Cluster connected components. Flag if volume > max_gas_volume_cc."
+    logic: "Isolate voxels < -800 inside body mask. Cluster connected components. Flag if volume > max_gas_volume_cc."
 
   - name: "ImplantAuditor"
     role: "High-Density Implant Detector"

@@ -17,6 +17,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import List, Dict
 import numpy as np
 from PIL import Image
+from backend.utils import segment_patient_body_only
 try:
     from .models import QAResult, StudySummary, IngestionStatus
     from .engine import QAEngine
@@ -36,7 +37,7 @@ except ImportError:
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # Load webApp configuration
-with open(os.path.join(ROOT_DIR, "webApp.yaml"), "r") as f:
+with open(os.path.join(ROOT_DIR, "webApp.yaml"), "r", encoding="utf-8") as f:
     config_web = yaml.safe_load(f)
 
 app = FastAPI(title="RapidCTQA API")
@@ -169,7 +170,7 @@ def on_series_received(series_uid: str):
         # Save to disk
         cache_file = os.path.join(study_path, "qa_result.json")
         try:
-            with open(cache_file, "w") as f:
+            with open(cache_file, "w", encoding="utf-8") as f:
                 f.write(result.json())
             print(f"Cached result saved to disk: {cache_file}")
         except Exception as e:
@@ -209,11 +210,19 @@ def _load_persisted_results():
         cache_file = os.path.join(study_path, "qa_result.json")
         if os.path.exists(cache_file):
             try:
-                with open(cache_file, "r") as f:
-                    data = json.load(f)
-                with results_cache_lock:
-                    results_cache[entry] = QAResult(**data)
-                print(f"Loaded cached result for {entry}")
+                data = None
+                try:
+                    with open(cache_file, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                except (UnicodeDecodeError, TypeError):
+                    # Fallback to cp1252 / latin-1 for legacy caches written on different OS platforms
+                    with open(cache_file, "r", encoding="cp1252") as f:
+                        data = json.load(f)
+
+                if data is not None:
+                    with results_cache_lock:
+                        results_cache[entry] = QAResult(**data)
+                    print(f"Loaded cached result for {entry}")
             except Exception as e:
                 print(f"Error loading cached result for {entry}: {e}")
 
@@ -404,7 +413,7 @@ async def viewer_info(series_uid: str):
     wl_presets = {}
     wl_path = os.path.join(ROOT_DIR, "WL.json")
     try:
-        with open(wl_path) as f:
+        with open(wl_path, "r", encoding="utf-8") as f:
             wl_presets = json.load(f).get("ct_window_level_presets", {})
     except Exception:
         pass
@@ -452,7 +461,7 @@ async def viewer_info(series_uid: str):
     }
 
 
-def _render_slice_png(dcm_path: str, window_width: float, window_level: float, metal_threshold: float, reference_point: dict = None) -> bytes:
+def _render_slice_png(dcm_path: str, window_width: float, window_level: float, metal_threshold: float, reference_point: dict = None, show_mask: bool = False) -> bytes:
     """Render a single DICOM slice as a PNG byte stream with W/L and optional metal overlay."""
     ds = pydicom.dcmread(dcm_path)
     img = ds.pixel_array.astype(np.float32)
@@ -467,6 +476,15 @@ def _render_slice_png(dcm_path: str, window_width: float, window_level: float, m
 
     # Convert to RGB so we can draw a coloured metal overlay
     rgb = np.stack([img_norm, img_norm, img_norm], axis=-1)
+
+    # Patient mask overlay: show filled patient body contour as a light blue tint
+    if show_mask:
+        try:
+            filled_mask = segment_patient_body_only(img, tissue_threshold_hu=-300)
+            if np.any(filled_mask):
+                rgb[filled_mask] = (rgb[filled_mask].astype(np.float32) * 0.75 + np.array([50, 150, 250], dtype=np.float32) * 0.25).astype(np.uint8)
+        except Exception as e:
+            print(f"Error drawing patient mask: {e}")
 
     # Metal overlay: pixels above threshold -> red tint
     metal_mask = img > metal_threshold
@@ -512,6 +530,7 @@ async def viewer_slice(
     ww: float = Query(default=400.0),
     wl: float = Query(default=40.0),
     metal: bool = Query(default=True),
+    mask: bool = Query(default=False),
 ):
     """Return a single DICOM slice as a PNG image with W/L and metal overlay applied."""
     dicom_files = _get_series_ct_files(series_uid)
@@ -535,6 +554,7 @@ async def viewer_slice(
             wl,
             metal_threshold,
             reference_point,
+            mask,
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Slice render failed: {e}")
@@ -588,7 +608,7 @@ async def reject_series(series_uid: str):
 
         # 5. Log rejection
         log_path = os.path.join(ROOT_DIR, "rejections.log")
-        with open(log_path, "a") as f:
+        with open(log_path, "a", encoding="utf-8") as f:
             f.write(f"{datetime.now().isoformat()} - {series_uid} rejected and deleted\n")
 
         return {"message": f"{series_uid} rejected"}

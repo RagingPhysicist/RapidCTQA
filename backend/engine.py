@@ -6,10 +6,11 @@ import os
 from concurrent.futures import ThreadPoolExecutor
 from typing import List, Dict, Any, Optional
 from .models import QAResult, QAFlag
+from backend.utils import segment_patient_body_only
 
 class QAEngine:
     def __init__(self, config_path: str):
-        with open(config_path, 'r') as f:
+        with open(config_path, 'r', encoding="utf-8") as f:
             self.config = yaml.safe_load(f)
 
     def _determine_true_patient_roll(self, pixel_array, hu_threshold=-300, angular_resolution=0.1):
@@ -22,8 +23,16 @@ class QAEngine:
         except ImportError:
             return {"status": "SKIPPED", "angle": 0.0, "confidence": 0.0, "message": "scikit-image not installed"}
 
-        # 1. Clean background noise to isolate the structural mass
-        clean_array = np.copy(pixel_array)
+        # 1. Clean background noise and treatment couch/accessories to isolate ONLY the patient's structural mass
+        try:
+            from backend.utils import segment_patient_body_only
+            body_mask = segment_patient_body_only(pixel_array, tissue_threshold_hu=hu_threshold)
+            clean_array = np.copy(pixel_array)
+            # Set non-patient pixels to background so they are cleaned uniformly
+            clean_array[~body_mask] = -1000.0
+        except Exception as e:
+            clean_array = np.copy(pixel_array)
+
         clean_array[clean_array < hu_threshold] = hu_threshold
 
         # 2. Compute Radon projections around the vertical axis (90 degrees)
@@ -271,24 +280,89 @@ class QAEngine:
         center_roi = hu_volume[mid_z, mid_y-20:mid_y+20, mid_x-20:mid_x+20]
         center_noise_std = float(np.std(center_roi))
 
+        # --- Body/Interior masks (Pre-computed for ImplantAuditor & CavityScout) ---
+        # 1. interior_mask: Filled patient mask (excluding table, devices, couch)
+        # 2. shrunk_mask: interior_mask eroded to ignore skin-surface objects
+        interior_mask = segment_patient_body_only(hu_volume, tissue_threshold_hu=-300)
+
+        shrunk_mask = np.zeros_like(hu_volume, dtype=bool)
+        erosion_px = int(10.0 / float(datasets[0].PixelSpacing[0]))
+        for i in range(hu_volume.shape[0]):
+            shrunk_mask[i] = ndimage.binary_erosion(interior_mask[i], iterations=erosion_px)
+
         # --- Agent: FluidPhysicist ---
         # Water/Fluid estimate (Soft tissue median)
         body_mask = hu_volume > -500
         water_hu_est = float(np.median(hu_volume[body_mask])) if np.any(body_mask) else 0.0
-        
+
         # Specific Fluid (Bladder range)
         fluid_pixels = hu_volume[(hu_volume >= 0) & (hu_volume <= 50) & body_mask]
         fluid_median = float(np.median(fluid_pixels)) if fluid_pixels.size > 0 else -1000.0
-        
+
         # --- Agent: CavityScout ---
+        is_pelvis_or_abdomen_scan = any(term in p_string or term in study_desc.upper() or term in body_part.upper()
+                                        for term in ["PELVIS", "PROSTATE", "ABD", "ABDOMEN", "RECTUM", "GYN", "PELVIC"])
+
         voxel_vol = (float(datasets[0].PixelSpacing[0]) * float(datasets[0].PixelSpacing[1]) * float(datasets[0].SliceThickness)) / 1000.0
-        gas_voxels = (hu_volume < -500) & body_mask # Adjusted threshold to -500 HU
-        gas_volume_cc = float(np.sum(gas_voxels) * voxel_vol)
+
+        gas_voxels = np.zeros_like(hu_volume, dtype=bool)
+        gas_volume_cc = 0.0
         gas_slices = []
-        if gas_volume_cc > 0:
-            for i in range(hu_volume.shape[0]):
-                if np.any(gas_voxels[i]):
-                    gas_slices.append(i + 1)
+
+        if is_pelvis_or_abdomen_scan:
+            # Scale 1.5 cm (15.0 mm) to pixels based on vertical spacing
+            pixel_spacing_y = float(datasets[0].PixelSpacing[1])
+            cutoff_pixels = int(15.0 / pixel_spacing_y)
+
+            # Only calculate gas within the lower (inferior-most) 50% of the slices along the Z-axis
+            num_slices = hu_volume.shape[0]
+            lower_body_slice_limit = max(1, num_slices // 2)
+
+            for i in range(lower_body_slice_limit):
+                # 1. Compute 2D internal air (entirely surrounded by tissue) using -800 HU threshold
+                tissue_mask_slice = (hu_volume[i] >= -800)
+                filled_tissue = ndimage.binary_fill_holes(tissue_mask_slice)
+                internal_air_slice = filled_tissue & ~tissue_mask_slice
+
+                # 2. Exclude bottom 1.5 cm of the patient mask (near couch interface)
+                y_indices = np.where(interior_mask[i])[0]
+                if y_indices.size > 0:
+                    ymax_patient = y_indices.max()
+                    y_cutoff = max(0, ymax_patient - cutoff_pixels)
+                    search_mask = np.copy(interior_mask[i])
+                    search_mask[y_cutoff:, :] = False
+                    internal_air_slice = internal_air_slice & search_mask
+                else:
+                    internal_air_slice = np.zeros_like(internal_air_slice, dtype=bool)
+
+                # 3. Anatomical Volume Gating: ignore any components leaking/pathway on adjacent slices
+                labeled_air, num_air_feats = ndimage.label(internal_air_slice)
+                gated_air_slice = np.zeros_like(internal_air_slice, dtype=bool)
+
+                for c in range(1, num_air_feats + 1):
+                    comp = (labeled_air == c)
+
+                    # Check leakage to i-1
+                    leak_prev = False
+                    if i > 0:
+                        leak_prev = np.any(comp & ~interior_mask[i-1])
+
+                    # Check leakage to i+1
+                    leak_next = False
+                    if i < num_slices - 1:
+                        leak_next = np.any(comp & ~interior_mask[i+1])
+
+                    if not (leak_prev or leak_next):
+                        gated_air_slice |= comp
+
+                gas_voxels[i] = gated_air_slice
+
+            gas_volume_cc = float(np.sum(gas_voxels) * voxel_vol)
+
+            if gas_volume_cc > 0:
+                for i in range(hu_volume.shape[0]):
+                    if np.any(gas_voxels[i]):
+                        gas_slices.append(i + 1)
 
         # --- Agent: ImplantAuditor ---
         # Build a per-slice filled body contour to accurately distinguish
@@ -299,36 +373,6 @@ class QAEngine:
         metal_vol_limit = implant_cfg.get("max_volume_cc", 0.05)
 
         all_metal_voxels = hu_volume > metal_threshold
-
-        # Body/Interior masks
-        # 1. raw_body: Basic threshold to find patient + table
-        # 2. patient_mask: Remove the table by keeping only the largest component
-        # 3. interior_mask: Filled patient mask
-        # 4. shrunk_mask: interior_mask eroded to ignore skin-surface objects
-        patient_mask = np.zeros_like(hu_volume, dtype=bool)
-        shrunk_mask = np.zeros_like(hu_volume, dtype=bool)
-        interior_mask = np.zeros_like(hu_volume, dtype=bool)
-
-        # Morphological erosion disk (~10mm)
-        erosion_px = int(10.0 / float(datasets[0].PixelSpacing[0]))
-
-        def _process_slice(i: int):
-            """Compute per-slice body masks; ndimage calls release the GIL."""
-            raw = hu_volume[i] > -500
-            if not np.any(raw):
-                return
-            labeled, num_features = ndimage.label(raw)
-            if num_features > 0:
-                sizes = ndimage.sum(raw, labeled, range(num_features + 1))
-                main_label = np.argmax(sizes[1:]) + 1
-                patient_slice = (labeled == main_label)
-                patient_mask[i] = patient_slice
-                filled = ndimage.binary_fill_holes(patient_slice)
-                interior_mask[i] = filled
-                shrunk_mask[i] = ndimage.binary_erosion(filled, iterations=erosion_px)
-
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            list(pool.map(_process_slice, range(hu_volume.shape[0])))
 
         metal_internal = all_metal_voxels & shrunk_mask
         metal_surface = all_metal_voxels & interior_mask & ~shrunk_mask
@@ -503,6 +547,7 @@ class QAEngine:
             "rescale_slope": rescale_slope,
             "marker_detected": len(marker_slices) > 0,
             "marker_slices": marker_slices,
+            "is_pelvis_or_abdomen_scan": is_pelvis_or_abdomen_scan,
         }
         return metrics
 
@@ -580,7 +625,9 @@ class QAEngine:
         # --- CavityScout Responsibilities ---
         if metrics["gas_volume_cc"] > 15.0:
             slice_info = self._format_slices(metrics.get("gas_slices", []))
-            if metrics["gas_volume_cc"] > 50.0:
+            if metrics.get("is_pelvis_or_abdomen_scan") and metrics["gas_volume_cc"] > 100.0:
+                flags.append(QAFlag(name="CavityScout", status="REJECT", message=f"SEGMENTATION_LEAK: Massive non-physiological air volume detected ({metrics['gas_volume_cc']:.1f} cc){slice_info}"))
+            elif metrics["gas_volume_cc"] > 50.0:
                 flags.append(QAFlag(name="CavityScout", status="REJECT", message=f"Excessive gas volume ({metrics['gas_volume_cc']:.1f} cc){slice_info}"))
             else:
                 flags.append(QAFlag(name="CavityScout", status="CONDITIONAL", message=f"Moderate gas volume ({metrics['gas_volume_cc']:.1f} cc){slice_info}"))
@@ -605,8 +652,6 @@ class QAEngine:
         if metrics.get("radon_status") != "SKIPPED":
             if abs(metrics["radon_roll_deg"]) > align_limit and metrics["radon_confidence"] > 0.95:
                 flags.append(QAFlag(name="AlignmentAuditor", status="CONDITIONAL", message=f"ROLL_ALERT: Patient rotation detected ({metrics['radon_roll_deg']:.2f}°, Confidence: {metrics['radon_confidence']:.2%})"))
-        if abs(metrics["radon_roll_deg"]) > align_limit and metrics["radon_confidence"] > 0.95:
-            flags.append(QAFlag(name="AlignmentAuditor", status="CONDITIONAL", message=f"ROLL_ALERT: Patient rotation detected ({metrics['radon_roll_deg']:.2f}°, Confidence: {metrics['radon_confidence']:.2%})"))
 
         # --- Integrity (Shared/Lead Oversight) ---
         if metrics["pediatric_mismatch"]:
