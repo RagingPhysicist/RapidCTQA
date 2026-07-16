@@ -210,11 +210,19 @@ def _load_persisted_results():
         cache_file = os.path.join(study_path, "qa_result.json")
         if os.path.exists(cache_file):
             try:
-                with open(cache_file, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                with results_cache_lock:
-                    results_cache[entry] = QAResult(**data)
-                print(f"Loaded cached result for {entry}")
+                data = None
+                try:
+                    with open(cache_file, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                except (UnicodeDecodeError, TypeError):
+                    # Fallback to cp1252 / latin-1 for legacy caches written on different OS platforms
+                    with open(cache_file, "r", encoding="cp1252") as f:
+                        data = json.load(f)
+
+                if data is not None:
+                    with results_cache_lock:
+                        results_cache[entry] = QAResult(**data)
+                    print(f"Loaded cached result for {entry}")
             except Exception as e:
                 print(f"Error loading cached result for {entry}: {e}")
 
