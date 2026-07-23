@@ -308,6 +308,7 @@ class QAEngine:
         gas_voxels = np.zeros_like(hu_volume, dtype=bool)
         gas_volume_cc = 0.0
         gas_slices = []
+        largest_gas_volume_cc = 0.0
 
         if is_pelvis_or_abdomen_scan:
             # Scale 1.5 cm (15.0 mm) to pixels based on vertical spacing
@@ -360,9 +361,28 @@ class QAEngine:
             gas_volume_cc = float(np.sum(gas_voxels) * voxel_vol)
 
             if gas_volume_cc > 0:
-                for i in range(hu_volume.shape[0]):
-                    if np.any(gas_voxels[i]):
-                        gas_slices.append(i + 1)
+                # 3D connected components labeling using 6-connectivity
+                structure = ndimage.generate_binary_structure(3, 1)
+                labeled_gas, num_gas_feats = ndimage.label(gas_voxels, structure=structure)
+
+                comp_vols = []
+                for feat_idx in range(1, num_gas_feats + 1):
+                    comp_mask = (labeled_gas == feat_idx)
+                    comp_vol = float(np.sum(comp_mask) * voxel_vol)
+                    comp_slice_indices = sorted(list(np.where(np.any(comp_mask, axis=(1, 2)))[0] + 1))
+                    comp_vols.append({
+                        "volume": comp_vol,
+                        "slices": comp_slice_indices
+                    })
+
+                if comp_vols:
+                    comp_vols.sort(key=lambda x: x["volume"], reverse=True)
+                    largest_comp = comp_vols[0]
+                    largest_gas_volume_cc = largest_comp["volume"]
+                    gas_slices = largest_comp["slices"]
+                else:
+                    largest_gas_volume_cc = 0.0
+                    gas_slices = []
 
         # --- Agent: ImplantAuditor ---
         # Build a per-slice filled body contour to accurately distinguish
@@ -527,6 +547,7 @@ class QAEngine:
             "water_hu_estimate": water_hu_est,
             "fluid_median_hu": fluid_median,
             "gas_volume_cc": gas_volume_cc,
+            "largest_gas_volume_cc": largest_gas_volume_cc,
             "gas_slices": gas_slices,
             "metal_detected": metal_detected,
             "metal_volume_cc": metal_internal_cc + metal_surface_cc + metal_external_cc,
@@ -623,14 +644,15 @@ class QAEngine:
             flags.append(QAFlag(name="FluidPhysicist", status="REJECT", message="Invalid RescaleSlope (0)"))
 
         # --- CavityScout Responsibilities ---
-        if metrics["gas_volume_cc"] > 15.0:
+        largest_gas_vol = metrics.get("largest_gas_volume_cc", 0.0)
+        if largest_gas_vol > 15.0:
             slice_info = self._format_slices(metrics.get("gas_slices", []))
-            if metrics.get("is_pelvis_or_abdomen_scan") and metrics["gas_volume_cc"] > 100.0:
-                flags.append(QAFlag(name="CavityScout", status="REJECT", message=f"SEGMENTATION_LEAK: Massive non-physiological air volume detected ({metrics['gas_volume_cc']:.1f} cc){slice_info}"))
-            elif metrics["gas_volume_cc"] > 50.0:
-                flags.append(QAFlag(name="CavityScout", status="REJECT", message=f"Excessive gas volume ({metrics['gas_volume_cc']:.1f} cc){slice_info}"))
+            if metrics.get("is_pelvis_or_abdomen_scan") and largest_gas_vol > 100.0:
+                flags.append(QAFlag(name="CavityScout", status="REJECT", message=f"SEGMENTATION_LEAK: Massive non-physiological air volume detected ({largest_gas_vol:.1f} cc){slice_info}"))
+            elif largest_gas_vol > 50.0:
+                flags.append(QAFlag(name="CavityScout", status="REJECT", message=f"Excessive gas volume ({largest_gas_vol:.1f} cc){slice_info}"))
             else:
-                flags.append(QAFlag(name="CavityScout", status="CONDITIONAL", message=f"Moderate gas volume ({metrics['gas_volume_cc']:.1f} cc){slice_info}"))
+                flags.append(QAFlag(name="CavityScout", status="CONDITIONAL", message=f"Moderate gas volume ({largest_gas_vol:.1f} cc){slice_info}"))
 
         # --- ImplantAuditor Responsibilities ---
         metal_limit = self.config.get("thresholds", {}).get("implants", {}).get("max_volume_cc", 0.05)
