@@ -277,5 +277,80 @@ thresholds:
         gas_flags_thorax = [f for f in result_thorax.flags if f.name == "CavityScout"]
         self.assertEqual(len(gas_flags_thorax), 0)
 
+    def test_cavity_scout_disconnected_gas(self):
+        # Create a pelvic scan with 10 slices
+        paths = self.create_ct_series(protocol="Pelvis Prostate", study_desc="Prostate Study", num_slices=10, pixel_spacing=[1.5, 1.5])
+
+        # We will add gas in slices 1, 2 and slices 4, 5. Slice 3 will have NO gas.
+        # This creates two disconnected gas bubbles separated by a slice with no gas.
+        # Slices 1, 2, 4, 5 correspond to 0-indexed indices 0, 1, 3, 4. These are in the lower 50% (slices 0 to 4).
+        for i, path in enumerate(paths):
+            ds = pydicom.dcmread(path)
+            pixels = np.frombuffer(ds.PixelData, dtype=np.uint16).copy().reshape((128, 128))
+            y, x = np.ogrid[:128, :128]
+
+            # Body contour (radius 48)
+            body_mask = (x - 64)**2 + (y - 64)**2 <= 48**2
+            pixels[body_mask] = 924
+
+            # Add gas in slices 0, 1 (first bubble) and slices 3, 4 (second bubble)
+            if i in [0, 1, 3, 4]:
+                # Gas cavity (radius 20 -> ~5.6 cc per slice, ~11.3 cc per bubble)
+                cavity_mask = (x - 64)**2 + (y - 64)**2 <= 20**2
+                pixels[cavity_mask] = 24
+
+            ds.PixelData = pixels.tobytes()
+            ds.save_as(path, write_like_original=False)
+
+        result = self.engine.analyze_series(paths)
+
+        # Verify total gas volume is combined (around 22.6 cc)
+        self.assertGreater(result.metrics["gas_volume_cc"], 20.0)
+        self.assertLess(result.metrics["gas_volume_cc"], 25.0)
+
+        # Verify the largest connected component is around 11.3 cc
+        self.assertGreater(result.metrics["largest_gas_volume_cc"], 10.0)
+        self.assertLess(result.metrics["largest_gas_volume_cc"], 12.0)
+
+        # Verify the gas_slices metric only has the slices of the largest bubble (slices 1 and 2, or slices 4 and 5)
+        # Slices indices: [1, 2] or [4, 5]
+        self.assertEqual(len(result.metrics["gas_slices"]), 2)
+        self.assertTrue(result.metrics["gas_slices"] == [1, 2] or result.metrics["gas_slices"] == [4, 5])
+
+        # Since largest gas volume is ~11.3 cc, which is <= 15.0 cc, there should be no CavityScout flag (PASS)
+        gas_flags = [f for f in result.flags if f.name == "CavityScout"]
+        self.assertEqual(len(gas_flags), 0, "No CavityScout flags should be triggered since neither individual bubble exceeds 15.0 cc")
+
+        # Now, let's make one of the bubbles larger (e.g. radius 25 in the second bubble, which is ~17.6 cc)
+        # This should trigger a CONDITIONAL flag, and report the slice range of that larger bubble [4, 5]
+        for i, path in enumerate(paths):
+            if i in [3, 4]:
+                ds = pydicom.dcmread(path)
+                pixels = np.frombuffer(ds.PixelData, dtype=np.uint16).copy().reshape((128, 128))
+                y, x = np.ogrid[:128, :128]
+                body_mask = (x - 64)**2 + (y - 64)**2 <= 48**2
+                pixels[body_mask] = 924
+                # Larger gas cavity (radius 25 -> ~8.8 cc per slice, ~17.6 cc per bubble)
+                cavity_mask = (x - 64)**2 + (y - 64)**2 <= 25**2
+                pixels[cavity_mask] = 24
+                ds.PixelData = pixels.tobytes()
+                ds.save_as(path, write_like_original=False)
+
+        result_large = self.engine.analyze_series(paths)
+
+        # Largest bubble should be around 17.6 cc
+        self.assertGreater(result_large.metrics["largest_gas_volume_cc"], 16.0)
+        self.assertLess(result_large.metrics["largest_gas_volume_cc"], 19.0)
+
+        # Slices should be [4, 5]
+        self.assertEqual(result_large.metrics["gas_slices"], [4, 5])
+
+        # CavityScout flag should be CONDITIONAL (15 cc < volume <= 50 cc)
+        gas_flags_large = [f for f in result_large.flags if f.name == "CavityScout"]
+        self.assertEqual(len(gas_flags_large), 1)
+        self.assertEqual(gas_flags_large[0].status, "CONDITIONAL")
+        self.assertIn("Moderate gas volume", gas_flags_large[0].message)
+        self.assertIn("Slices 4-5", gas_flags_large[0].message)
+
 if __name__ == '__main__':
     unittest.main()
