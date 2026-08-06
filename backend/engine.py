@@ -188,7 +188,12 @@ class QAEngine:
         slice_spacing_var = float(np.max(spacings) - np.min(spacings)) if len(spacings) > 0 else 0.0
         monotonic_z = all(np.diff(z_positions) > 0) or all(np.diff(z_positions) < 0)
         duplicate_slices = len(set(z_positions)) != len(z_positions)
-        
+
+        # --- Body/Interior masks (Pre-computed for GeometryGuardian, ImplantAuditor & CavityScout) ---
+        # 1. interior_mask: Filled patient mask (excluding table, devices, couch)
+        # 2. shrunk_mask: interior_mask eroded to ignore skin-surface objects
+        interior_mask = segment_patient_body_only(hu_volume, tissue_threshold_hu=-300)
+
         # --- Agent: GeometryGuardian ---
         study_desc = str(getattr(datasets[0], 'StudyDescription', '')).lower()
         protocol_lower = protocol.lower()
@@ -211,17 +216,12 @@ class QAEngine:
         border_mask[:, :2] = True
         border_mask[:, -2:] = True
 
-        # Preserve head/neck scan posterior table exception
-        if is_head_scan:
-            border_mask[-2:, :] = False
-
-        skin_threshold_hu = -200
         truncation_error = False
         truncated_slices = []
         tolerated_truncated_slices = []
 
         for i, slice_data in enumerate(hu_volume):
-            trunc_y, trunc_x = np.where((slice_data > skin_threshold_hu) & border_mask)
+            trunc_y, trunc_x = np.where(interior_mask[i] & border_mask)
             
             # If no tissue (or fewer than 5 pixels to avoid noise) touches the border, the slice is clean
             if len(trunc_y) < 5:
@@ -279,11 +279,6 @@ class QAEngine:
         mid_z, mid_y, mid_x = [s // 2 for s in hu_volume.shape]
         center_roi = hu_volume[mid_z, mid_y-20:mid_y+20, mid_x-20:mid_x+20]
         center_noise_std = float(np.std(center_roi))
-
-        # --- Body/Interior masks (Pre-computed for ImplantAuditor & CavityScout) ---
-        # 1. interior_mask: Filled patient mask (excluding table, devices, couch)
-        # 2. shrunk_mask: interior_mask eroded to ignore skin-surface objects
-        interior_mask = segment_patient_body_only(hu_volume, tissue_threshold_hu=-300)
 
         shrunk_mask = np.zeros_like(hu_volume, dtype=bool)
         erosion_px = int(10.0 / float(datasets[0].PixelSpacing[0]))
