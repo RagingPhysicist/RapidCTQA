@@ -14,14 +14,15 @@ def segment_patient_body_only(ct_volume, tissue_threshold_hu=-300, num_workers=4
 
         rows, cols = raw.shape
 
-        # Check for empty slice based on connected tissue mass size (scaling 500 voxels for resolution)
+        # We look for actual patient tissue density (e.g. > -200 HU) to distinguish patient from couch accessories/table.
+        tissue_check = slice_data > -200
         ref_area = 512 * 512
         min_voxels = int(500 * (rows * cols) / ref_area)
         min_voxels = max(20, min_voxels)
 
-        labeled_raw, num_features = ndimage.label(raw)
+        labeled_raw, num_features = ndimage.label(tissue_check)
         if num_features > 0:
-            sizes = ndimage.sum(raw, labeled_raw, range(1, num_features + 1))
+            sizes = ndimage.sum(tissue_check, labeled_raw, range(1, num_features + 1))
             if np.max(sizes) < min_voxels:
                 return np.zeros_like(raw, dtype=bool)
         else:

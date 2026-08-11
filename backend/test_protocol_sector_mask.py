@@ -306,6 +306,34 @@ thresholds:
         # Slices 1 and 2 (0-indexed indices 0 and 1) should be detected as empty
         self.assertEqual(result.metrics["empty_slices"], [1, 2])
 
+    def test_empty_slice_rejection_with_couch_accessories(self):
+        # Slice 0 has couch/immobilization accessories but no patient.
+        # The couch accessory is low-density (e.g. -400 HU -> stored as 624).
+        # Slices 1, 2, 3, 4 have valid patient tissue.
+        paths = self.create_ct_series(protocol="H&N C-Spine", study_desc="Brain Study", num_slices=5)
+
+        # Modify slice 0 to have a couch accessory (large component but HU < -200 HU, e.g., -400 HU)
+        ds_0 = pydicom.dcmread(paths[0])
+        pixels_0 = np.frombuffer(ds_0.PixelData, dtype=np.uint16).copy().reshape((128, 128))
+        pixels_0[50:80, 20:100] = 624 # -400 HU (tissue_threshold_hu is -300 HU, so this is > -500 but < -200)
+        ds_0.PixelData = pixels_0.tobytes()
+        ds_0.save_as(paths[0], write_like_original=False)
+
+        # Modify slice 1, 2, 3, 4 to have valid patient tissue
+        for idx in [1, 2, 3, 4]:
+            ds = pydicom.dcmread(paths[idx])
+            pixels = np.frombuffer(ds.PixelData, dtype=np.uint16).copy().reshape((128, 128))
+            y, x = np.ogrid[:128, :128]
+            body_mask = (x - 64)**2 + (y - 64)**2 <= 20**2
+            pixels[body_mask] = 924 # -100 HU (> -200 HU)
+            ds.PixelData = pixels.tobytes()
+            ds.save_as(paths[idx], write_like_original=False)
+
+        result = self.engine.analyze_series(paths)
+        self.assertIn("empty_slices", result.metrics)
+        # Slice 1 (0-indexed index 0) should be detected as empty despite the couch accessory
+        self.assertIn(1, result.metrics["empty_slices"])
+
     def test_dual_zone_accessory_truncation(self):
         # Create a series with a valid patient body in the center (radius 25 pixels)
         # And place a high density accessory (> -300 HU, e.g., -100 HU / 924 stored) in the outermost 3 pixels on slice 2.
