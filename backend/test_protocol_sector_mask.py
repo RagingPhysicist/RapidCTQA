@@ -279,6 +279,68 @@ thresholds:
         gas_flags_thorax = [f for f in result_thorax.flags if f.name == "CavityScout"]
         self.assertEqual(len(gas_flags_thorax), 0)
 
+    def test_empty_slice_rejection(self):
+        # Create a series where slice 0 is completely empty, slice 1 has some noise (< 500 contiguous pixels, e.g. 5x5 pixels),
+        # and slices 2, 3, 4 have a large body/patient core (radius 20 pixels -> >1200 pixels).
+        paths = self.create_ct_series(protocol="H&N C-Spine", study_desc="Brain Study", num_slices=5)
+
+        # Modify slice 1 to have small noise / non-empty but extremely small tissue area
+        ds_1 = pydicom.dcmread(paths[1])
+        pixels_1 = np.frombuffer(ds_1.PixelData, dtype=np.uint16).copy().reshape((128, 128))
+        pixels_1[60:65, 60:65] = 924 # 25 pixels -> under min_voxels threshold of ~31 (scaled from 500 for 128x128)
+        ds_1.PixelData = pixels_1.tobytes()
+        ds_1.save_as(paths[1], write_like_original=False)
+
+        # Modify slice 2, 3, 4 to have valid patient tissue
+        for idx in [2, 3, 4]:
+            ds = pydicom.dcmread(paths[idx])
+            pixels = np.frombuffer(ds.PixelData, dtype=np.uint16).copy().reshape((128, 128))
+            y, x = np.ogrid[:128, :128]
+            body_mask = (x - 64)**2 + (y - 64)**2 <= 20**2 # ~1250 pixels
+            pixels[body_mask] = 924
+            ds.PixelData = pixels.tobytes()
+            ds.save_as(paths[idx], write_like_original=False)
+
+        result = self.engine.analyze_series(paths)
+        self.assertIn("empty_slices", result.metrics)
+        # Slices 1 and 2 (0-indexed indices 0 and 1) should be detected as empty
+        self.assertEqual(result.metrics["empty_slices"], [1, 2])
+
+    def test_dual_zone_accessory_truncation(self):
+        # Create a series with a valid patient body in the center (radius 25 pixels)
+        # And place a high density accessory (> -300 HU, e.g., -100 HU / 924 stored) in the outermost 3 pixels on slice 2.
+        # But, do NOT touch the absolute patient contour to the edge.
+        paths = self.create_ct_series(protocol="Pelvis Prostate", study_desc="Prostate Study", num_slices=5)
+
+        for idx in range(5):
+            ds = pydicom.dcmread(paths[idx])
+            pixels = np.frombuffer(ds.PixelData, dtype=np.uint16).copy().reshape((128, 128))
+            y, x = np.ogrid[:128, :128]
+            # Center body (radius 25)
+            body_mask = (x - 64)**2 + (y - 64)**2 <= 25**2
+            pixels[body_mask] = 924
+
+            # On slice 2, add high-density accessory touching the border (row 0 to 2, columns 40 to 60)
+            if idx == 2:
+                pixels[0:3, 40:61] = 924
+
+            ds.PixelData = pixels.tobytes()
+            ds.save_as(paths[idx], write_like_original=False)
+
+        result = self.engine.analyze_series(paths)
+        # Verify accessory truncation is detected on slice 3 (1-based)
+        self.assertTrue(result.metrics["accessory_truncation_detected"])
+        self.assertEqual(result.metrics["accessory_truncated_slices"], [3])
+        # Verify critical truncation error is FALSE
+        self.assertFalse(result.metrics["truncation_error"])
+
+        # Verify flagged warning status is CONDITIONAL
+        gg_flags = [f for f in result.flags if f.name == "GeometryGuardian"]
+        self.assertEqual(len(gg_flags), 1)
+        self.assertEqual(gg_flags[0].status, "CONDITIONAL")
+        self.assertIn("Accessory/Table Truncation Detected", gg_flags[0].message)
+        self.assertIn("Slice 3", gg_flags[0].message)
+
     def test_head_scan_non_circular_fov_corners_bypass(self):
         # Simulate a head scan with a rectangular / non-circular FOV (with cut-off corners).
         # We simulate this by placing high intensity values (e.g. tissue density, 924 stored / -100 HU)

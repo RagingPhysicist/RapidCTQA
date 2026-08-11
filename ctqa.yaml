@@ -122,6 +122,8 @@ thresholds:
   geometry:
     max_slice_spacing_variation_mm: 1.0
     max_gantry_tilt_deg: 1.0
+    accessory_ring_width_px: 3
+    accessory_threshold_hu: -300
 
   slice_thickness:
     preferred_max_mm: 3.0
