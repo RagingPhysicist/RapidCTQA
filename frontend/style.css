@@ -191,6 +191,49 @@ td {
   position: relative;
 }
 
+.logs-modal-content {
+  max-width: 1000px;
+  width: 95%;
+}
+
+.log-filters {
+  display: flex;
+  gap: 1rem;
+  flex-wrap: wrap;
+  align-items: center;
+  background: var(--glass);
+  padding: 1rem;
+  border-radius: 0.75rem;
+  border: 1px solid var(--border);
+  margin-bottom: 1rem;
+}
+
+.filter-group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.filter-group label {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  font-weight: 600;
+}
+
+.log-input, .log-select {
+  background: rgba(15, 23, 42, 0.8);
+  border: 1px solid var(--border);
+  color: var(--text-main);
+  padding: 0.4rem 0.65rem;
+  border-radius: 0.5rem;
+  font-size: 0.85rem;
+  outline: none;
+}
+
+.log-input:focus, .log-select:focus {
+  border-color: var(--primary);
+}
+
 .close-btn {
   position: absolute;
   top: 1rem;

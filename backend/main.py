@@ -14,7 +14,7 @@ import threading
 import yaml
 import platform
 from concurrent.futures import ThreadPoolExecutor
-from typing import List, Dict
+from typing import List, Dict, Optional
 import numpy as np
 from PIL import Image
 from backend.utils import segment_patient_body_only
@@ -24,6 +24,7 @@ try:
     from .listener import DicomListener
     from .reporter import generate_pdf_report
     from .dicom_sender import send_dicom_series
+    from .logger import log_qa_result, query_logs, export_logs_csv
 except ImportError:
     import sys
     # Add root folder to sys.path when running main.py directly
@@ -33,6 +34,7 @@ except ImportError:
     from backend.listener import DicomListener
     from backend.reporter import generate_pdf_report
     from backend.dicom_sender import send_dicom_series
+    from backend.logger import log_qa_result, query_logs, export_logs_csv
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -175,6 +177,24 @@ def on_series_received(series_uid: str):
             print(f"Cached result saved to disk: {cache_file}")
         except Exception as e:
             print(f"Error saving cached result to disk: {e}")
+
+        # Extract patient_id and log QA Result
+        patient_id = "Unknown"
+        for f in dicom_files:
+            try:
+                ds = pydicom.dcmread(f, stop_before_pixels=True)
+                pid = str(getattr(ds, 'PatientID', '')).strip()
+                if pid:
+                    patient_id = pid
+                    break
+            except Exception:
+                continue
+
+        try:
+            log_qa_result(result, patient_id=patient_id)
+            print(f"QA result logged to daily log file for {series_uid}")
+        except Exception as e:
+            print(f"Error logging QA result for {series_uid}: {e}")
         
         # Generate PDF report automatically in reports folder
         pdf_path = os.path.join(REPORTS_DIR, f"QA_Report_{series_uid}.pdf")
@@ -220,9 +240,31 @@ def _load_persisted_results():
                         data = json.load(f)
 
                 if data is not None:
+                    qa_res = QAResult(**data)
                     with results_cache_lock:
-                        results_cache[entry] = QAResult(**data)
+                        results_cache[entry] = qa_res
                     print(f"Loaded cached result for {entry}")
+
+                    # Extract patient_id if available
+                    patient_id = "Unknown"
+                    files = glob.glob(os.path.join(study_path, "*.dcm"))
+                    for f in files:
+                        try:
+                            ds = pydicom.dcmread(f, stop_before_pixels=True)
+                            pid = str(getattr(ds, 'PatientID', '')).strip()
+                            if pid:
+                                patient_id = pid
+                                break
+                        except Exception:
+                            continue
+
+                    # Log to daily log
+                    mtime_ts = None
+                    try:
+                        mtime_ts = datetime.fromtimestamp(os.path.getmtime(cache_file)).isoformat()
+                    except Exception:
+                        pass
+                    log_qa_result(qa_res, patient_id=patient_id, timestamp=mtime_ts)
             except Exception as e:
                 print(f"Error loading cached result for {entry}: {e}")
 
@@ -615,6 +657,46 @@ async def reject_series(series_uid: str):
     except Exception as e:
         print(f"Error during series rejection: {e}")
         raise HTTPException(status_code=500, detail=f"Rejection failed: {e}")
+
+@app.get("/api/logs")
+async def get_logs(
+    date: Optional[str] = Query(default=None),
+    status: Optional[str] = Query(default=None),
+    issue_type: Optional[str] = Query(default=None),
+    search: Optional[str] = Query(default=None),
+):
+    """Query logged problem reports and QA results with filters."""
+    logs = query_logs(date_str=date, status=status, issue_type=issue_type, search=search)
+    return logs
+
+
+@app.get("/api/logs/download")
+async def download_logs(
+    date: Optional[str] = Query(default=None),
+    status: Optional[str] = Query(default=None),
+    issue_type: Optional[str] = Query(default=None),
+    search: Optional[str] = Query(default=None),
+    format: str = Query(default="json"),
+):
+    """Download filtered logs as JSON or CSV file."""
+    logs = query_logs(date_str=date, status=status, issue_type=issue_type, search=search)
+    date_filename = date if date else datetime.now().strftime("%Y-%m-%d")
+
+    if format.lower() == "csv":
+        csv_content = export_logs_csv(logs)
+        return StreamingResponse(
+            io.BytesIO(csv_content.encode("utf-8")),
+            media_type="text/csv",
+            headers={"Content-Disposition": f"attachment; filename=qa_problem_logs_{date_filename}.csv"}
+        )
+
+    json_content = json.dumps(logs, indent=2, ensure_ascii=False)
+    return StreamingResponse(
+        io.BytesIO(json_content.encode("utf-8")),
+        media_type="application/json",
+        headers={"Content-Disposition": f"attachment; filename=qa_problem_logs_{date_filename}.json"}
+    )
+
 
 @app.get("/api/reports/{series_uid}/pdf")
 async def get_pdf_report(series_uid: str):

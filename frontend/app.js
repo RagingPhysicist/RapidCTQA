@@ -398,6 +398,95 @@ function closeModal() {
   document.getElementById('modal').style.display = 'none';
 }
 
+// ── Logs Modal Functions ──────────────────────────────────────────
+let logFetchTimer = null;
+
+function openLogsModal() {
+  document.getElementById('logs-modal').style.display = 'flex';
+  fetchLogs();
+}
+
+function closeLogsModal() {
+  document.getElementById('logs-modal').style.display = 'none';
+}
+
+function resetLogFilters() {
+  document.getElementById('log-filter-date').value = '';
+  document.getElementById('log-filter-status').value = 'ALL';
+  document.getElementById('log-filter-issue').value = 'ALL';
+  document.getElementById('log-filter-search').value = '';
+  fetchLogs();
+}
+
+function debouncedFetchLogs() {
+  clearTimeout(logFetchTimer);
+  logFetchTimer = setTimeout(fetchLogs, 250);
+}
+
+function _buildLogQueryParams() {
+  const date = document.getElementById('log-filter-date').value;
+  const status = document.getElementById('log-filter-status').value;
+  const issue = document.getElementById('log-filter-issue').value;
+  const search = document.getElementById('log-filter-search').value;
+
+  const params = new URLSearchParams();
+  if (date) params.append('date', date);
+  if (status && status !== 'ALL') params.append('status', status);
+  if (issue && issue !== 'ALL') params.append('issue_type', issue);
+  if (search && search.trim()) params.append('search', search.trim());
+
+  return params.toString();
+}
+
+async function fetchLogs() {
+  try {
+    const query = _buildLogQueryParams();
+    const url = `${API_BASE}/logs${query ? '?' + query : ''}`;
+    const response = await fetch(url);
+    const logs = await response.json();
+    const tbody = document.getElementById('logs-table-body');
+    tbody.innerHTML = '';
+
+    if (!logs || logs.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="5" style="text-align:center; color: var(--text-muted); padding: 2rem;">No matching log records found.</td></tr>';
+      return;
+    }
+
+    logs.forEach(log => {
+      const tr = document.createElement('tr');
+      const timeFormatted = log.timestamp ? log.timestamp.replace('T', ' ').substring(0, 19) : log.date || '';
+
+      let issuesHtml = '';
+      if (log.issues && log.issues.length > 0) {
+        issuesHtml = log.issues.map(iss => `<div style="font-size: 0.8rem; margin-bottom: 0.2rem; color: #fca5a5;">• ${iss}</div>`).join('');
+      } else {
+        issuesHtml = '<span style="font-size: 0.8rem; color: var(--text-muted);">No QA flags / issues</span>';
+      }
+
+      tr.innerHTML = `
+        <td style="font-size: 0.75rem; font-family: monospace; white-space: nowrap;">${timeFormatted}</td>
+        <td style="font-weight: 600;">
+          <div>${log.patient_name || 'Unknown'}</div>
+          <div style="font-size: 0.75rem; color: var(--text-muted);">ID: ${log.patient_id || 'N/A'}</div>
+        </td>
+        <td style="color: var(--text-muted); font-size: 0.85rem;">${log.protocol || 'Unknown'}</td>
+        <td><span class="badge badge-${(log.status || 'unknown').toLowerCase()}">${log.status || 'UNKNOWN'}</span></td>
+        <td style="max-width: 350px;">${issuesHtml}</td>
+      `;
+      tbody.appendChild(tr);
+    });
+  } catch (error) {
+    console.error('Failed to fetch logs:', error);
+  }
+}
+
+function downloadLogs(format) {
+  const query = _buildLogQueryParams();
+  const params = new URLSearchParams(query);
+  params.append('format', format);
+  window.open(`${API_BASE}/logs/download?${params.toString()}`, '_blank');
+}
+
 // Initial fetch and polling
 fetchStatus();
 fetchStudies();
