@@ -1,0 +1,30 @@
+[
+  {
+    "timestamp": "2025-05-10T14:30:00",
+    "date": "2025-05-10",
+    "series_uid": "1.2.3.4.5.6.7890",
+    "patient_name": "DOE^JOHN",
+    "patient_id": "PID12345",
+    "protocol": "Pelvis_Std",
+    "status": "REJECT",
+    "flags": [
+      {
+        "name": "CavityScout",
+        "status": "REJECT",
+        "message": "Excessive Bowel Gas detected (55.2 cc)"
+      },
+      {
+        "name": "GeometryGuardian",
+        "status": "ACCEPT",
+        "message": "FOV bounds ok"
+      }
+    ],
+    "metrics": {
+      "gas_volume_cc": 55.2,
+      "background_air_sd": 12.5
+    },
+    "issues": [
+      "CavityScout: Excessive Bowel Gas detected (55.2 cc)"
+    ]
+  }
+]

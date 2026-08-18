@@ -16,7 +16,12 @@
         <div class="logo">RapidCTQA</div>
         <span id="dashboard-version" class="version-tag"></span>
       </div>
-      <div id="connection-status" class="badge badge-pending">Connecting...</div>
+      <div style="display: flex; align-items: center; gap: 1rem;">
+        <button id="logs-btn" class="view-btn" onclick="openLogsModal()" style="background: linear-gradient(135deg, var(--secondary), var(--primary)); color: #fff; font-weight: 600; border: none;">
+          📋 Problem Logs
+        </button>
+        <div id="connection-status" class="badge badge-pending">Connecting...</div>
+      </div>
     </header>
 
     <main>
@@ -65,6 +70,74 @@
       <h2 id="modal-title">Study Details</h2>
       <div id="modal-body">
         <!-- Dynamically populated -->
+      </div>
+    </div>
+  </div>
+
+  <!-- Problem Logs Modal -->
+  <div id="logs-modal" class="modal-overlay">
+    <div class="modal-content logs-modal-content">
+      <button class="close-btn" onclick="closeLogsModal()">&times;</button>
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.5rem; flex-wrap: wrap; gap: 1rem;">
+        <h2>📋 QA Problem & Processing Logs</h2>
+        <div style="display: flex; gap: 0.5rem;">
+          <button class="view-btn" style="background: var(--success); color: #fff; font-weight: 600;" onclick="downloadLogs('csv')">📥 Download CSV</button>
+          <button class="view-btn" style="background: var(--secondary); color: #fff; font-weight: 600;" onclick="downloadLogs('json')">📥 Download JSON</button>
+        </div>
+      </div>
+
+      <!-- Filters -->
+      <div class="log-filters">
+        <div class="filter-group">
+          <label for="log-filter-date">Date</label>
+          <input type="date" id="log-filter-date" class="log-input" onchange="fetchLogs()" />
+        </div>
+        <div class="filter-group">
+          <label for="log-filter-status">Status</label>
+          <select id="log-filter-status" class="log-select" onchange="fetchLogs()">
+            <option value="ALL">All Statuses</option>
+            <option value="REJECT">REJECT Only</option>
+            <option value="CONDITIONAL">CONDITIONAL Only</option>
+            <option value="ACCEPT">ACCEPT Only</option>
+          </select>
+        </div>
+        <div class="filter-group">
+          <label for="log-filter-issue">Issue Type / Agent</label>
+          <select id="log-filter-issue" class="log-select" onchange="fetchLogs()">
+            <option value="ALL">All Agents / Issues</option>
+            <option value="GeometryGuardian">GeometryGuardian</option>
+            <option value="NoiseWhisperer">NoiseWhisperer</option>
+            <option value="FluidPhysicist">FluidPhysicist</option>
+            <option value="CavityScout">CavityScout</option>
+            <option value="ImplantAuditor">ImplantAuditor</option>
+            <option value="AlignmentAuditor">AlignmentAuditor</option>
+            <option value="Integrity">Integrity</option>
+          </select>
+        </div>
+        <div class="filter-group" style="flex: 1; min-width: 180px;">
+          <label for="log-filter-search">Search</label>
+          <input type="text" id="log-filter-search" class="log-input" placeholder="Patient, ID, or UID..." oninput="debouncedFetchLogs()" />
+        </div>
+        <div class="filter-group" style="align-self: flex-end;">
+          <button class="view-btn" style="background: var(--glass);" onclick="resetLogFilters()">Reset</button>
+        </div>
+      </div>
+
+      <div class="study-list" style="margin-top: 1rem; max-height: 55vh; overflow-y: auto;">
+        <table>
+          <thead>
+            <tr>
+              <th>Timestamp</th>
+              <th>Patient</th>
+              <th>Protocol</th>
+              <th>Status</th>
+              <th>Issues Identified</th>
+            </tr>
+          </thead>
+          <tbody id="logs-table-body">
+            <!-- Dynamically populated -->
+          </tbody>
+        </table>
       </div>
     </div>
   </div>
