@@ -156,6 +156,8 @@ def generate_pdf_report(result: QAResult, output_path: str):
         ("Truncation Detected", "Yes" if result.metrics.get("truncation_detected") else "No"),
         ("Truncation Error Detected", "Yes" if result.metrics.get("truncation_error") else "No"),
         ("Tolerated Truncation Detected", "Yes" if result.metrics.get("tolerated_truncated_slices") else "No"),
+        ("Accessory Truncation Detected", "Yes" if result.metrics.get("accessory_truncation_detected") else "No"),
+        ("Empty Slices Detected", "Yes" if result.metrics.get("empty_slices") else "No"),
     ]
 
     pdf.set_font('helvetica', '', 10)
@@ -178,6 +180,8 @@ def generate_pdf_report(result: QAResult, output_path: str):
     slice_metrics = [
         ("Truncated Slices", result.metrics.get("truncated_slices")),
         ("Truncated Slices (Tolerated)", result.metrics.get("tolerated_truncated_slices")),
+        ("Accessory Truncated Slices", result.metrics.get("accessory_truncated_slices")),
+        ("Empty Slices", result.metrics.get("empty_slices")),
         ("Tilted/Rotated Slices", result.metrics.get("tilted_slices")),
         ("Gas Pockets Slices", result.metrics.get("gas_slices")),
         ("Metal Implants Slices", result.metrics.get("metal_slices")),

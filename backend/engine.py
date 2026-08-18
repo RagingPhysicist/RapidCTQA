@@ -194,6 +194,12 @@ class QAEngine:
         # 2. shrunk_mask: interior_mask eroded to ignore skin-surface objects
         interior_mask = segment_patient_body_only(hu_volume, tissue_threshold_hu=-300)
 
+        # Track validated empty slices where the mask is completely False
+        empty_slices = []
+        for i in range(hu_volume.shape[0]):
+            if not np.any(interior_mask[i]):
+                empty_slices.append(i + 1)
+
         # --- Agent: GeometryGuardian ---
         study_desc = str(getattr(datasets[0], 'StudyDescription', '')).lower()
         protocol_lower = protocol.lower()
@@ -209,56 +215,85 @@ class QAEngine:
         _, H, W = hu_volume.shape
         center_y, center_x = H // 2, W // 2
 
-        # Find any tissue touching the absolute outermost edge pixels (2 pixels wide border)
+        # 1) Check 1: Critical Patient Truncation (2-pixel outer boundary)
         border_mask = np.zeros((H, W), dtype=bool)
         border_mask[:2, :] = True
         border_mask[-2:, :] = True
         border_mask[:, :2] = True
         border_mask[:, -2:] = True
 
+        # 2) Check 2: Accessory Truncation Ring (outer border ring of configurable width / threshold)
+        geom_cfg = self.config.get("thresholds", {}).get("geometry", {})
+        ring_width = geom_cfg.get("accessory_ring_width_px", 3)
+        accessory_threshold = geom_cfg.get("accessory_threshold_hu", -300)
+
+        accessory_ring_mask = np.zeros((H, W), dtype=bool)
+        accessory_ring_mask[:ring_width, :] = True
+        accessory_ring_mask[-ring_width:, :] = True
+        accessory_ring_mask[:, :ring_width] = True
+        accessory_ring_mask[:, -ring_width:] = True
+
         truncation_error = False
         truncated_slices = []
         tolerated_truncated_slices = []
 
+        accessory_truncation_detected = False
+        accessory_truncated_slices = []
+
         for i, slice_data in enumerate(hu_volume):
-            trunc_y, trunc_x = np.where(interior_mask[i] & border_mask)
-            
-            # If no tissue (or fewer than 5 pixels to avoid noise) touches the border, the slice is clean
-            if len(trunc_y) < 5:
+            # If this is a validated empty slice, bypass truncation checks on it
+            if i + 1 in empty_slices:
                 continue
 
-            # Convert the touching points to angles to see WHERE it is touching
-            angles_rad = np.arctan2(trunc_y - center_y, trunc_x - center_x)
-            angles_deg = np.degrees(angles_rad) % 360
+            # First, check for critical patient truncation using interior_mask and 2px border
+            trunc_y, trunc_x = np.where(interior_mask[i] & border_mask)
+            
+            patient_truncated_this_slice = False
+            if len(trunc_y) >= 5:
+                angles_rad = np.arctan2(trunc_y - center_y, trunc_x - center_x)
+                angles_deg = np.degrees(angles_rad) % 360
 
-            critical_violation_found = False
-            lateral_violation_count = 0
+                critical_violation_found = False
+                lateral_violation_count = 0
 
-            for angle in angles_deg:
-                # Define the lateral arm sectors (9 to 10 o'clock and 2 to 3 o'clock regions)
-                is_right_lateral = (315.0 <= angle or angle <= 45.0)
-                is_left_lateral = (135.0 <= angle <= 225.0)
+                for angle in angles_deg:
+                    # Define the lateral arm sectors (9 to 10 o'clock and 2 to 3 o'clock regions)
+                    is_right_lateral = (315.0 <= angle or angle <= 45.0)
+                    is_left_lateral = (135.0 <= angle <= 225.0)
 
-                if is_right_lateral or is_left_lateral:
-                    lateral_violation_count += 1
+                    if is_right_lateral or is_left_lateral:
+                        lateral_violation_count += 1
+                    else:
+                        # Tissue is touching the top (chest/chin) or bottom (back/couch)
+                        critical_violation_found = True
+                        break
+
+                # Apply Clinical Decision Rules
+                if critical_violation_found:
+                    patient_truncated_this_slice = True
+                elif lateral_violation_count > 0:
+                    if not is_lenient_protocol:
+                        patient_truncated_this_slice = True
+
+                if patient_truncated_this_slice:
+                    truncation_error = True
+                    truncated_slices.append(i + 1)
                 else:
-                    # Tissue is touching the top (chest/chin) or bottom (back/couch)
-                    critical_violation_found = True
-                    break
+                    tolerated_truncated_slices.append(i + 1)
 
-            # Apply Clinical Decision Rules
-            slice_truncated = False
-            if critical_violation_found:
-                slice_truncated = True
-            elif lateral_violation_count > 0:
-                if not is_lenient_protocol:
-                    slice_truncated = True
+            # Second, check for accessory/peripheral truncation if patient tissue is NOT truncated on this slice
+            if not patient_truncated_this_slice:
+                # We check for ANY high-density material exceeding accessory_threshold inside the accessory ring mask.
+                # However, we must exclude the patient's segmented body (interior_mask) to avoid double-counting patient tissue.
+                # Only check pixels that are high-density and NOT part of the patient's segmented body
+                # Filter out values that are outside interior_mask
+                non_patient_mask = accessory_ring_mask & ~interior_mask[i]
+                high_density_non_patient_y, high_density_non_patient_x = np.where(non_patient_mask & (slice_data > accessory_threshold))
 
-            if slice_truncated:
-                truncation_error = True
-                truncated_slices.append(i + 1)
-            else:
-                tolerated_truncated_slices.append(i + 1)
+                # If there are at least 5 contiguous/total pixels to avoid noise
+                if len(high_density_non_patient_y) >= 5:
+                    accessory_truncation_detected = True
+                    accessory_truncated_slices.append(i + 1)
 
         # --- Agent: NoiseWhisperer ---
         # Logic: Crop 20x20px regions from the four extreme corners (Background Air).
@@ -516,6 +551,9 @@ class QAEngine:
             "gantry_tilt": float(getattr(datasets[0], 'GantryDetectorTilt', 0.0)),
             "truncation_detected": truncation_error or len(tolerated_truncated_slices) > 0,
             "truncation_error": truncation_error,
+            "accessory_truncation_detected": accessory_truncation_detected,
+            "accessory_truncated_slices": accessory_truncated_slices,
+            "empty_slices": empty_slices,
             "background_air_sd": background_air_sd,
             "center_noise_std": center_noise_std,
             "air_hu_estimate": air_est,
@@ -586,6 +624,9 @@ class QAEngine:
         if metrics.get("truncation_error", False):
             slice_info = self._format_slices(metrics.get("truncated_slices", []))
             flags.append(QAFlag(name="GeometryGuardian", status="REJECT", message=f"TRUNCATION_ERROR: Anatomy exceeds FOV{slice_info}"))
+        elif metrics.get("accessory_truncation_detected", False):
+            slice_info = self._format_slices(metrics.get("accessory_truncated_slices", []))
+            flags.append(QAFlag(name="GeometryGuardian", status="CONDITIONAL", message=f"Accessory/Table Truncation Detected at FOV Edge (Non-Critical Body Anatomy){slice_info}"))
         
         if metrics["slice_spacing_var"] > 1.0:
             flags.append(QAFlag(name="GeometryGuardian", status="REJECT", message=f"Slice spacing variation too high ({metrics['slice_spacing_var']:.2f}mm)"))
