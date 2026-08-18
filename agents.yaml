@@ -1,4 +1,4 @@
-version: "1.1"
+version: "1.2"
 metadata:
   purpose: "Rapid Radiotherapy CT QA"
   system_threshold_unit: "Hounsfield Units (HU)"
@@ -10,7 +10,9 @@ agents:
     parameters:
       skin_threshold: -200
       edge_buffer_px: 3
-    logic: "Scan image matrix perimeter. If count(edge_buffer > skin_threshold) >= 5 on any slice, trigger TRUNCATION_ERROR."
+      accessory_ring_width_px: 3
+      accessory_threshold_hu: -300
+    logic: "Scan image matrix perimeter. If count(edge_buffer > skin_threshold) >= 5 on any slice, trigger TRUNCATION_ERROR. Otherwise, check for accessory/table truncation using peripheral accessory ring."
 
   - name: "FluidPhysicist"
     role: "HU Accuracy Specialist"
