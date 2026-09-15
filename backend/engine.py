@@ -6,7 +6,7 @@ import os
 from concurrent.futures import ThreadPoolExecutor
 from typing import List, Dict, Any, Optional
 from .models import QAResult, QAFlag
-from backend.utils import segment_patient_body_only
+from backend.utils import segment_patient_body_only, segment_patient_and_accessories
 
 class QAEngine:
     def __init__(self, config_path: str):
@@ -161,10 +161,12 @@ class QAEngine:
         flags = self._evaluate_rules(metrics)
         
         status = "ACCEPT"
-        if any(f.status == "REJECT" for f in flags):
-            status = "REJECT"
-        elif any(f.status == "CONDITIONAL" for f in flags):
-            status = "CONDITIONAL"
+        if any(f.status in ["REJECT", "FAIL_CRITICAL"] for f in flags):
+            status = "FAIL_CRITICAL"
+        elif any(f.status in ["CONDITIONAL", "PASS_WITH_WARNING"] for f in flags):
+            status = "PASS_WITH_WARNING"
+        elif any(f.status == "PASS" for f in flags):
+            status = "PASS"
             
         return QAResult(
             series_uid=series_uid,
@@ -190,9 +192,15 @@ class QAEngine:
         duplicate_slices = len(set(z_positions)) != len(z_positions)
 
         # --- Body/Interior masks (Pre-computed for GeometryGuardian, ImplantAuditor & CavityScout) ---
-        # 1. interior_mask: Filled patient mask (excluding table, devices, couch)
-        # 2. shrunk_mask: interior_mask eroded to ignore skin-surface objects
-        interior_mask = segment_patient_body_only(hu_volume, tissue_threshold_hu=-300)
+        # 1. patient_body_mask (interior_mask): Filled patient mask (excluding table, devices, couch)
+        # 2. accessory_table_mask: Couch, wingboard, vac-bag, immobilizers
+        pixel_spacing = (float(datasets[0].PixelSpacing[0]), float(datasets[0].PixelSpacing[1]))
+        patient_body_mask, accessory_table_mask = segment_patient_and_accessories(
+            hu_volume,
+            tissue_threshold_hu=-300,
+            pixel_spacing=pixel_spacing
+        )
+        interior_mask = patient_body_mask
 
         # Track validated empty slices where the mask is completely False
         empty_slices = []
@@ -215,23 +223,13 @@ class QAEngine:
         _, H, W = hu_volume.shape
         center_y, center_x = H // 2, W // 2
 
-        # 1) Check 1: Critical Patient Truncation (2-pixel outer boundary)
-        border_mask = np.zeros((H, W), dtype=bool)
-        border_mask[:2, :] = True
-        border_mask[-2:, :] = True
-        border_mask[:, :2] = True
-        border_mask[:, -2:] = True
-
-        # 2) Check 2: Accessory Truncation Ring (outer border ring of configurable width / threshold)
         geom_cfg = self.config.get("thresholds", {}).get("geometry", {})
-        ring_width = geom_cfg.get("accessory_ring_width_px", 3)
-        accessory_threshold = geom_cfg.get("accessory_threshold_hu", -300)
-
-        accessory_ring_mask = np.zeros((H, W), dtype=bool)
-        accessory_ring_mask[:ring_width, :] = True
-        accessory_ring_mask[-ring_width:, :] = True
-        accessory_ring_mask[:, :ring_width] = True
-        accessory_ring_mask[:, -ring_width:] = True
+        edge_buffer = geom_cfg.get("edge_buffer_px", 3)
+        border_mask = np.zeros((H, W), dtype=bool)
+        border_mask[:edge_buffer, :] = True
+        border_mask[-edge_buffer:, :] = True
+        border_mask[:, :edge_buffer] = True
+        border_mask[:, -edge_buffer:] = True
 
         truncation_error = False
         truncated_slices = []
@@ -245,55 +243,88 @@ class QAEngine:
             if i + 1 in empty_slices:
                 continue
 
-            # First, check for critical patient truncation using interior_mask and 2px border
-            trunc_y, trunc_x = np.where(interior_mask[i] & border_mask)
-            
+            # Stage A: Patient Body Truncation Check (Critical Failure Condition A)
+            trunc_y, trunc_x = np.where(patient_body_mask[i] & border_mask)
             patient_truncated_this_slice = False
+
             if len(trunc_y) >= 5:
                 angles_rad = np.arctan2(trunc_y - center_y, trunc_x - center_x)
                 angles_deg = np.degrees(angles_rad) % 360
 
                 critical_violation_found = False
                 lateral_violation_count = 0
+                max_lateral_depth_mm = 0.0
 
-                for angle in angles_deg:
-                    # Define the lateral arm sectors (9 to 10 o'clock and 2 to 3 o'clock regions)
+                for idx_p, angle in enumerate(angles_deg):
                     is_right_lateral = (315.0 <= angle or angle <= 45.0)
                     is_left_lateral = (135.0 <= angle <= 225.0)
 
                     if is_right_lateral or is_left_lateral:
                         lateral_violation_count += 1
                     else:
-                        # Tissue is touching the top (chest/chin) or bottom (back/couch)
+                        # Anterior or Posterior core sector
                         critical_violation_found = True
                         break
 
-                # Apply Clinical Decision Rules
-                if critical_violation_found:
-                    patient_truncated_this_slice = True
-                elif lateral_violation_count > 0:
-                    if not is_lenient_protocol:
-                        patient_truncated_this_slice = True
+                if not critical_violation_found and lateral_violation_count > 0:
+                    left_mask = (trunc_x < edge_buffer)
+                    if np.any(left_mask):
+                        left_rows = trunc_y[left_mask]
+                        depth_px = int(np.max(np.where(patient_body_mask[i][left_rows, :])[1]) + 1)
+                        max_lateral_depth_mm = max(max_lateral_depth_mm, depth_px * pixel_spacing[0])
 
-                if patient_truncated_this_slice:
+                    right_mask = (trunc_x >= W - edge_buffer)
+                    if np.any(right_mask):
+                        right_rows = trunc_y[right_mask]
+                        depth_px = int((W - 1) - np.min(np.where(patient_body_mask[i][right_rows, :])[1]) + 1)
+                        max_lateral_depth_mm = max(max_lateral_depth_mm, depth_px * pixel_spacing[0])
+
+                # Protocol lateral thresholds
+                if is_lenient_protocol:
+                    lateral_tol_mm = 15.0  # Thorax / Breast: 15 mm tolerance for flared wingboard/elbow
+                elif is_head_scan:
+                    lateral_tol_mm = 5.0   # H&N: 5 mm tolerance
+                else:
+                    lateral_tol_mm = 0.0   # Pelvis / Prostate: 0 mm tolerance
+
+                if critical_violation_found or (lateral_violation_count > 0 and max_lateral_depth_mm > lateral_tol_mm):
+                    patient_truncated_this_slice = True
                     truncation_error = True
                     truncated_slices.append(i + 1)
-                else:
+                elif lateral_violation_count > 0:
                     tolerated_truncated_slices.append(i + 1)
 
-            # Second, check for accessory/peripheral truncation if patient tissue is NOT truncated on this slice
+            # Stage B: Standalone Accessory / Table Truncation Check (Non-Critical Warning Condition B)
             if not patient_truncated_this_slice:
-                # We check for ANY high-density material exceeding accessory_threshold inside the accessory ring mask.
-                # However, we must exclude the patient's segmented body (interior_mask) to avoid double-counting patient tissue.
-                # Only check pixels that are high-density and NOT part of the patient's segmented body
-                # Filter out values that are outside interior_mask
-                non_patient_mask = accessory_ring_mask & ~interior_mask[i]
-                high_density_non_patient_y, high_density_non_patient_x = np.where(non_patient_mask & (slice_data > accessory_threshold))
-
-                # If there are at least 5 contiguous/total pixels to avoid noise
-                if len(high_density_non_patient_y) >= 5:
-                    accessory_truncation_detected = True
-                    accessory_truncated_slices.append(i + 1)
+                acc_trunc_y, acc_trunc_x = np.where(accessory_table_mask[i] & border_mask)
+                if len(acc_trunc_y) >= 5:
+                    # For lenient protocols (Thorax/Breast): measure lateral depth of accessory clip.
+                    # If < 15 mm, classify as a tolerated truncation warning (not accessory).
+                    # If >= 15 mm, escalate to a critical truncation error.
+                    classified_as_tolerated = False
+                    if is_lenient_protocol:
+                        max_acc_lateral_depth_mm = 0.0
+                        left_acc = (acc_trunc_x < edge_buffer)
+                        if np.any(left_acc):
+                            left_rows = acc_trunc_y[left_acc]
+                            right_extent = int(np.max(np.where(accessory_table_mask[i][left_rows, :])[1]) + 1)
+                            max_acc_lateral_depth_mm = max(max_acc_lateral_depth_mm, right_extent * pixel_spacing[0])
+                        right_acc = (acc_trunc_x >= W - edge_buffer)
+                        if np.any(right_acc):
+                            right_rows = acc_trunc_y[right_acc]
+                            left_extent = int((W - 1) - np.min(np.where(accessory_table_mask[i][right_rows, :])[1]) + 1)
+                            max_acc_lateral_depth_mm = max(max_acc_lateral_depth_mm, left_extent * pixel_spacing[0])
+                        if max_acc_lateral_depth_mm < 15.0:
+                            tolerated_truncated_slices.append(i + 1)
+                            classified_as_tolerated = True
+                        else:
+                            # Depth >= 15mm on a lenient protocol: escalate to critical truncation error
+                            truncation_error = True
+                            truncated_slices.append(i + 1)
+                            classified_as_tolerated = True  # Prevent double-counting in accessory list
+                    if not classified_as_tolerated:
+                        accessory_truncation_detected = True
+                        accessory_truncated_slices.append(i + 1)
 
         # --- Agent: NoiseWhisperer ---
         # Logic: Crop 20x20px regions from the four extreme corners (Background Air).
@@ -328,6 +359,7 @@ class QAEngine:
         # Specific Fluid (Bladder range)
         fluid_pixels = hu_volume[(hu_volume >= 0) & (hu_volume <= 50) & body_mask]
         fluid_median = float(np.median(fluid_pixels)) if fluid_pixels.size > 0 else -1000.0
+        fluid_pixels_found = fluid_pixels.size > 0
 
         # --- Agent: CavityScout ---
         is_pelvis_or_abdomen_scan = any(term in p_string or term in study_desc.upper() or term in body_part.upper()
@@ -559,6 +591,7 @@ class QAEngine:
             "air_hu_estimate": air_est,
             "water_hu_estimate": water_hu_est,
             "fluid_median_hu": fluid_median,
+            "fluid_pixels_found": fluid_pixels_found,
             "gas_volume_cc": gas_volume_cc,
             "gas_slices": gas_slices,
             "metal_detected": metal_detected,
@@ -623,10 +656,17 @@ class QAEngine:
         # --- GeometryGuardian Responsibilities ---
         if metrics.get("truncation_error", False):
             slice_info = self._format_slices(metrics.get("truncated_slices", []))
-            flags.append(QAFlag(name="GeometryGuardian", status="REJECT", message=f"TRUNCATION_ERROR: Anatomy exceeds FOV{slice_info}"))
+            flags.append(QAFlag(name="GeometryGuardian", status="FAIL_CRITICAL", message=f"TRUNCATION_ERROR: Patient Body Truncation Detected (Anatomy exceeds FOV){slice_info}"))
         elif metrics.get("accessory_truncation_detected", False):
             slice_info = self._format_slices(metrics.get("accessory_truncated_slices", []))
-            flags.append(QAFlag(name="GeometryGuardian", status="CONDITIONAL", message=f"Accessory/Table Truncation Detected at FOV Edge (Non-Critical Body Anatomy){slice_info}"))
+            flags.append(QAFlag(name="GeometryGuardian", status="PASS_WITH_WARNING", message=f"Accessory / Positioning Device Truncated at FOV Edge (Non-Critical Body Anatomy){slice_info}"))
+        elif len(metrics.get("tolerated_truncated_slices", [])) > 0:
+            slice_info = self._format_slices(metrics.get("tolerated_truncated_slices", []))
+            flags.append(QAFlag(name="GeometryGuardian", status="PASS_WITH_WARNING", message=f"Flared wingboard elbow clipping within clinical tolerance (<15mm){slice_info}"))
+
+        if len(metrics.get("empty_slices", [])) > 0:
+            slice_info = self._format_slices(metrics.get("empty_slices", []))
+            flags.append(QAFlag(name="GeometryGuardian", status="SKIPPED", message=f"EMPTY_SLICE: Over-range air slices bypassed{slice_info}"))
         
         if metrics["slice_spacing_var"] > 1.0:
             flags.append(QAFlag(name="GeometryGuardian", status="REJECT", message=f"Slice spacing variation too high ({metrics['slice_spacing_var']:.2f}mm)"))
@@ -648,25 +688,32 @@ class QAEngine:
             flags.append(QAFlag(name="NoiseWhisperer", status="REJECT", message=f"Air HU calibration error ({metrics['air_hu_estimate']:.1f})"))
 
         # --- FluidPhysicist Responsibilities ---
-        if 0 <= metrics["fluid_median_hu"] <= 35:
-            pass # Optimal
-        elif 35 < metrics["fluid_median_hu"] <= 45:
-            flags.append(QAFlag(name="FluidPhysicist", status="CONDITIONAL", message=f"Fluid density variance ({metrics['fluid_median_hu']:.1f} HU)"))
-        else:
-            flags.append(QAFlag(name="FluidPhysicist", status="REJECT", message=f"HU Consistency failure ({metrics['fluid_median_hu']:.1f} HU)"))
+        # Only evaluate fluid HU calibration when actual fluid-range pixels exist in the scan.
+        if metrics.get("fluid_pixels_found", False):
+            if 0 <= metrics["fluid_median_hu"] <= 35:
+                pass  # Optimal
+            elif 35 < metrics["fluid_median_hu"] <= 45:
+                flags.append(QAFlag(name="FluidPhysicist", status="CONDITIONAL", message=f"Fluid density variance ({metrics['fluid_median_hu']:.1f} HU)"))
+            else:
+                flags.append(QAFlag(name="FluidPhysicist", status="REJECT", message=f"HU Consistency failure ({metrics['fluid_median_hu']:.1f} HU)"))
 
         if metrics["rescale_slope"] == 0:
             flags.append(QAFlag(name="FluidPhysicist", status="REJECT", message="Invalid RescaleSlope (0)"))
 
         # --- CavityScout Responsibilities ---
-        if metrics["gas_volume_cc"] > 15.0:
+        if metrics.get("is_pelvis_or_abdomen_scan"):
             slice_info = self._format_slices(metrics.get("gas_slices", []))
-            if metrics.get("is_pelvis_or_abdomen_scan") and metrics["gas_volume_cc"] > 100.0:
+            if metrics["gas_volume_cc"] > 100.0:
                 flags.append(QAFlag(name="CavityScout", status="REJECT", message=f"SEGMENTATION_LEAK: Massive non-physiological air volume detected ({metrics['gas_volume_cc']:.1f} cc){slice_info}"))
             elif metrics["gas_volume_cc"] > 50.0:
                 flags.append(QAFlag(name="CavityScout", status="REJECT", message=f"Excessive gas volume ({metrics['gas_volume_cc']:.1f} cc){slice_info}"))
-            else:
+            elif metrics["gas_volume_cc"] > 15.0:
                 flags.append(QAFlag(name="CavityScout", status="CONDITIONAL", message=f"Moderate gas volume ({metrics['gas_volume_cc']:.1f} cc){slice_info}"))
+            else:
+                flags.append(QAFlag(name="CavityScout", status="PASS", message=f"Rectal gas volume within physiological limits ({metrics['gas_volume_cc']:.1f} cc)"))
+        elif metrics["gas_volume_cc"] > 15.0:
+            slice_info = self._format_slices(metrics.get("gas_slices", []))
+            flags.append(QAFlag(name="CavityScout", status="CONDITIONAL", message=f"Moderate gas volume ({metrics['gas_volume_cc']:.1f} cc){slice_info}"))
 
         # --- ImplantAuditor Responsibilities ---
         metal_limit = self.config.get("thresholds", {}).get("implants", {}).get("max_volume_cc", 0.05)

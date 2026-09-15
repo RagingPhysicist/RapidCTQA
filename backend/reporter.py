@@ -88,8 +88,9 @@ def generate_pdf_report(result: QAResult, output_path: str):
             # Value cell (regular, colored for final status)
             pdf.set_font('helvetica', '', 11)
             if label == 'Final Status:':
-                if value == 'ACCEPT': pdf.set_text_color(16, 185, 129)
-                elif value == 'CONDITIONAL': pdf.set_text_color(245, 158, 11)
+                if value in ('ACCEPT', 'PASS'): pdf.set_text_color(16, 185, 129)
+                elif value in ('CONDITIONAL', 'PASS_WITH_WARNING'): pdf.set_text_color(245, 158, 11)
+                elif value == 'SKIPPED': pdf.set_text_color(100, 116, 139)
                 else: pdf.set_text_color(239, 68, 68)
             row.cell(str(value))
             pdf.set_text_color(0, 0, 0) # Reset
@@ -118,8 +119,9 @@ def generate_pdf_report(result: QAResult, output_path: str):
             row.cell(flag.name)
             
             # Status Color
-            if flag.status == 'ACCEPT': pdf.set_text_color(16, 185, 129)
-            elif flag.status == 'CONDITIONAL': pdf.set_text_color(245, 158, 11)
+            if flag.status in ('ACCEPT', 'PASS'): pdf.set_text_color(16, 185, 129)
+            elif flag.status in ('CONDITIONAL', 'PASS_WITH_WARNING'): pdf.set_text_color(245, 158, 11)
+            elif flag.status == 'SKIPPED': pdf.set_text_color(100, 116, 139)
             else: pdf.set_text_color(239, 68, 68)
             row.cell(flag.status)
             

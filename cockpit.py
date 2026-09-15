@@ -290,7 +290,7 @@ class ClinicalTriageApp(ctk.CTk):
             self.flag_box.insert("end", "-"*30 + "\n")
             
             for flag in result.flags:
-                color = "RED" if flag.status == "REJECT" else "YELLOW" if flag.status == "CONDITIONAL" else "GREEN"
+                color = "RED" if flag.status in ("REJECT", "FAIL_CRITICAL") else "YELLOW" if flag.status in ("CONDITIONAL", "PASS_WITH_WARNING") else "GRAY" if flag.status == "SKIPPED" else "GREEN"
                 self.flag_box.insert("end", f"[{flag.status}] {flag.name}\n")
                 self.flag_box.insert("end", f" >> {flag.message}\n\n")
             

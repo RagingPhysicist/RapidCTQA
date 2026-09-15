@@ -6,13 +6,26 @@ metadata:
 agents:
   - name: "GeometryGuardian"
     role: "Truncation & FOV Detector"
-    description: "Ensures the patient anatomy is fully contained within the reconstruction FOV."
+    description: "Ensures the patient anatomy is fully contained within the reconstruction FOV while decoupling positioning accessories."
     parameters:
       skin_threshold: -200
       edge_buffer_px: 3
-      accessory_ring_width_px: 3
+      couch_exclusion_margin_mm: 2.0
+      couch_search_region_y_ratio: 0.55
+      tissue_bridge_opening_mm: 5.0
       accessory_threshold_hu: -300
-    logic: "Scan image matrix perimeter. If count(edge_buffer > skin_threshold) >= 5 on any slice, trigger TRUNCATION_ERROR. Otherwise, check for accessory/table truncation using peripheral accessory ring."
+      lateral_tolerance_thorax_breast_mm: 15.0
+      lateral_tolerance_head_neck_mm: 5.0
+      lateral_tolerance_pelvis_mm: 0.0
+    logic: |
+      1. Stage 1 (Posterior Couch Exclusion): Detect primary horizontal carbon-fiber line in lower quadrant (y > 0.55 H); apply dynamic 2.0 mm boundary cutoff above couch surface plane.
+      2. Stage 2 (Morphological Opening): Apply directional (vertical/lateral 5 mm) opening matrix to sever narrow tissue bridges connecting skin to vac-bags, wingboards, or headrests; isolate largest 3D connected component corresponding to human anatomy.
+      3. Stage 3 (Dual Masking): Generate distinct, mutually exclusive masks: 'patient_body_mask' (patient tissue only) and 'accessory_table_mask' (couch, wingboard, vac-bag, immobilizers).
+      4. Dual-Stage Truncation Classifier:
+         - Condition A (Critical Failure): patient_body_mask intersects outermost border ring (<= 3 px) in A/P core sector OR exceeds protocol lateral thresholds -> FAIL_CRITICAL ("Patient Body Truncation Detected").
+         - Condition B (Non-Critical Warning): accessory_table_mask intersects outermost border ring while patient_body_mask is intact -> PASS_WITH_WARNING ("Accessory / Positioning Device Truncated at FOV Edge").
+         - Over-range air slices -> SKIPPED (EMPTY_SLICE).
+         - Flared wingboard elbow clipping in Thorax/Breast (< 15 mm) -> PASS_WITH_WARNING.
 
   - name: "FluidPhysicist"
     role: "HU Accuracy Specialist"
@@ -47,7 +60,14 @@ agents:
     parameters:
       air_threshold: -800
       max_gas_volume_cc: 15.0
-    logic: "Isolate voxels < -800 inside body mask. Cluster connected components. Flag if volume > max_gas_volume_cc."
+      physiological_variance_threshold_cc: 15.0
+    logic: |
+      1. Isolate internal voxels < -800 HU within pelvic/abdominal region.
+      2. If total gas volume <= 15.0 cc in pelvis, return 'PASS' (normal physiological variance).
+      3. If 15.0 cc < gas volume <= 50.0 cc, flag 'CONDITIONAL' (moderate gas volume).
+      4. If 50.0 cc < gas volume <= 100.0 cc, flag 'REJECT' (excessive gas volume).
+      5. If gas volume > 100.0 cc, flag 'REJECT' (SEGMENTATION_LEAK).
+      6. Non-pelvic scans bypass cavity alerts.
 
   - name: "ImplantAuditor"
     role: "High-Density Implant Detector"
@@ -72,7 +92,7 @@ agents:
       5. Trigger 'ROLL_ALERT' if the absolute deviation exceeds max_roll_tolerance_deg with a profile confidence score > 0.95.
 
 
-- name: "ReviewerAgent"
+  - name: "ReviewerAgent"
     role: "Gatekeeper"
     description: "Orchestrates doctor approval and records the final clinical decision."
     parameters:
@@ -88,3 +108,7 @@ orchestrator:
   error_handling:
     water_hu_33_fix: "If FluidPhysicist returns < 35 and non-contrast, downgrade 'Critical Failure' to 'Clinical Variance'."
     noise_fix: "Prioritize NoiseWhisperer.air_sd over internal image variance."
+    table_vacbag_clipping_fix: "Downgrade table / vac-bag clipped at FOV edge to PASS_WITH_WARNING without critical stop."
+    wingboard_elbow_fix: "Suppress flared wingboard elbow clipping in Thorax/Breast if depth < 15 mm to PASS_WITH_WARNING."
+    empty_slice_fix: "Skip empty air slices above head / below feet as EMPTY_SLICE."
+    pelvic_rectal_gas_fix: "Classify Pelvic Rectal Gas Volume < 15 cc as PASS (normal physiological variance)."

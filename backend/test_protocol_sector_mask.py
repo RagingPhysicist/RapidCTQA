@@ -362,11 +362,11 @@ thresholds:
         # Verify critical truncation error is FALSE
         self.assertFalse(result.metrics["truncation_error"])
 
-        # Verify flagged warning status is CONDITIONAL
+        # Verify flagged warning status is PASS_WITH_WARNING
         gg_flags = [f for f in result.flags if f.name == "GeometryGuardian"]
         self.assertEqual(len(gg_flags), 1)
-        self.assertEqual(gg_flags[0].status, "CONDITIONAL")
-        self.assertIn("Accessory/Table Truncation Detected", gg_flags[0].message)
+        self.assertEqual(gg_flags[0].status, "PASS_WITH_WARNING")
+        self.assertIn("Accessory", gg_flags[0].message)
         self.assertIn("Slice 3", gg_flags[0].message)
 
     def test_head_scan_non_circular_fov_corners_bypass(self):

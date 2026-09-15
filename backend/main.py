@@ -204,8 +204,8 @@ def on_series_received(series_uid: str):
         except Exception as e:
             print(f"Error auto-generating PDF report: {e}")
         
-        # Auto-export if ACCEPTED
-        if result.status == "ACCEPT":
+        # Auto-export if ACCEPTED / PASSED
+        if result.status in ("ACCEPT", "PASS"):
             dest = os.path.join(EXPORT_DIR, series_uid)
             if not os.path.exists(dest):
                 print(f"Auto-exporting {series_uid} to TPS...")
@@ -357,11 +357,14 @@ async def get_studies(background_tasks: BackgroundTasks):
         ))
     status_priority = {
         "REJECT": 0,
+        "FAIL_CRITICAL": 0,
         "CONDITIONAL": 1,
+        "PASS_WITH_WARNING": 1,
         "ACCEPT": 2,
         "PASS": 2,
-        "PENDING": 3,
-        "INGESTING": 4
+        "SKIPPED": 3,
+        "PENDING": 4,
+        "INGESTING": 5
     }
     summaries.sort(key=lambda s: status_priority.get(s.status.upper(), 99))
     return summaries

@@ -200,7 +200,7 @@ async function launchCockpit(seriesUid) {
     // Render QA flags
     const flagsEl = document.getElementById('cockpit-flags');
     if (info.flags && info.flags.length > 0) {
-      const colours = { REJECT: '#ef4444', CONDITIONAL: '#f59e0b', ACCEPT: '#10b981', PASS: '#10b981' };
+      const colours = { REJECT: '#ef4444', FAIL_CRITICAL: '#ef4444', CONDITIONAL: '#f59e0b', PASS_WITH_WARNING: '#f59e0b', ACCEPT: '#10b981', PASS: '#10b981', SKIPPED: '#64748b' };
       flagsEl.innerHTML = info.flags.map(f => {
         // Detect slice indicators like "(Slice 5)" or "(Slices 10-15)"
         const match = f.message ? f.message.match(/\(Slices?\s+(\d+)/) : null;
