@@ -138,7 +138,18 @@ def query_logs(
                 continue
 
         if status and status.strip() and status.strip().upper() != "ALL":
-            if r.get("status", "").upper() != status.strip().upper():
+            req_status = status.strip().upper()
+            r_status = r.get("status", "").upper()
+            matched = False
+            if req_status in ("REJECT", "FAIL_CRITICAL") and r_status in ("REJECT", "FAIL_CRITICAL"):
+                matched = True
+            elif req_status in ("CONDITIONAL", "PASS_WITH_WARNING") and r_status in ("CONDITIONAL", "PASS_WITH_WARNING"):
+                matched = True
+            elif req_status in ("ACCEPT", "PASS") and r_status in ("ACCEPT", "PASS"):
+                matched = True
+            elif req_status == r_status:
+                matched = True
+            if not matched:
                 continue
 
         if issue_type and issue_type.strip() and issue_type.strip().upper() != "ALL":
