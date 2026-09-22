@@ -45,7 +45,8 @@ import shutil
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Tuple
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
@@ -281,6 +282,95 @@ class SegmentationService:
     # ------------------------------------------------------------------
     # Main public method
     # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
+    # NIfTI Mask Loader Helper
+    # ------------------------------------------------------------------
+
+    def load_body_mask(
+        self,
+        series_uid: str,
+        task: str = DEFAULT_TASK,
+        target_shape: Optional[Tuple[int, int, int]] = None,
+    ) -> Optional[np.ndarray]:
+        """
+        Load existing body segmentation NIfTI mask for a series as a 3D boolean numpy array.
+
+        Parameters
+        ----------
+        series_uid:
+            The SeriesInstanceUID.
+        task:
+            Task name (default: 'body').
+        target_shape:
+            Expected (D, H, W) volume shape for alignment verification.
+
+        Returns
+        -------
+        Optional[np.ndarray]
+            3D boolean numpy array of shape (D, H, W) matching DICOM volume indexing,
+            or None if no segmentation is cached/available.
+        """
+        cached = self._cached_result(series_uid, task)
+        if cached is None or not cached.mask_files:
+            return None
+
+        try:
+            import nibabel as nib
+        except ImportError:
+            logger.warning("nibabel is not installed; cannot load NIfTI segmentation mask.")
+            return None
+
+        # Prioritise 'body' label, fallback to combining all available mask files
+        mask_files_to_load = []
+        if "body" in cached.mask_files:
+            mask_files_to_load.append(cached.mask_files["body"])
+        else:
+            mask_files_to_load = list(cached.mask_files.values())
+
+        if not mask_files_to_load:
+            return None
+
+        combined_mask: Optional[np.ndarray] = None
+
+        for path in mask_files_to_load:
+            if not os.path.isfile(path):
+                continue
+            try:
+                nii = nib.load(path)
+                data = nii.get_fdata()
+
+                if data.ndim == 3:
+                    # Convert NIfTI (W, H, D) -> DICOM volume (D, H, W)
+                    if target_shape is not None:
+                        D, H, W = target_shape
+                        if data.shape == (W, H, D):
+                            arr = np.transpose(data, (2, 1, 0))
+                        elif data.shape == (D, H, W):
+                            arr = data
+                        elif data.shape == (H, W, D):
+                            arr = np.transpose(data, (2, 0, 1))
+                        else:
+                            arr = np.transpose(data, (2, 1, 0))
+                    else:
+                        arr = np.transpose(data, (2, 1, 0))
+
+                    mask_bool = arr > 0
+                    if combined_mask is None:
+                        combined_mask = mask_bool
+                    else:
+                        combined_mask = combined_mask | mask_bool
+            except Exception as exc:
+                logger.warning("Failed to read NIfTI mask %s: %s", path, exc)
+
+        if combined_mask is not None and target_shape is not None:
+            if combined_mask.shape != target_shape:
+                logger.warning(
+                    "Segmentation mask shape %s does not match target shape %s for series %s",
+                    combined_mask.shape, target_shape, series_uid
+                )
+
+        return combined_mask
 
     def run_body_segmentation(
         self,

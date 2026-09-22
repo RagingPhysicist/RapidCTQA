@@ -9,9 +9,11 @@ from .models import QAResult, QAFlag
 from backend.utils import segment_patient_body_only, segment_patient_and_accessories
 
 class QAEngine:
-    def __init__(self, config_path: str):
+    def __init__(self, config_path: str, storage_dir: Optional[str] = None, segmentation_service: Any = None):
         with open(config_path, 'r', encoding="utf-8") as f:
             self.config = yaml.safe_load(f)
+        self.storage_dir = storage_dir
+        self.segmentation_service = segmentation_service
 
     def _determine_true_patient_roll(self, pixel_array, hu_threshold=-300, angular_resolution=0.1):
         """
@@ -195,11 +197,57 @@ class QAEngine:
         # 1. patient_body_mask (interior_mask): Filled patient mask (excluding table, devices, couch)
         # 2. accessory_table_mask: Couch, wingboard, vac-bag, immobilizers
         pixel_spacing = (float(datasets[0].PixelSpacing[0]), float(datasets[0].PixelSpacing[1]))
-        patient_body_mask, accessory_table_mask = segment_patient_and_accessories(
-            hu_volume,
-            tissue_threshold_hu=-300,
-            pixel_spacing=pixel_spacing
-        )
+        series_uid = datasets[0].SeriesInstanceUID
+
+        patient_body_mask = None
+        accessory_table_mask = None
+
+        # Determine SegmentationService to use
+        seg_service = self.segmentation_service
+        if seg_service is None:
+            fn = getattr(datasets[0], 'filename', None)
+            if fn:
+                s_dir = os.path.dirname(fn)
+                st_dir = os.path.dirname(s_dir)
+                if st_dir and os.path.isdir(st_dir):
+                    try:
+                        from backend.segmentation import SegmentationService
+                        seg_service = SegmentationService(storage_dir=st_dir)
+                    except Exception:
+                        seg_service = None
+
+        if seg_service and seg_service.is_available:
+            try:
+                seg_service.run_body_segmentation(
+                    series_uid=series_uid,
+                    task="body",
+                    fast=True,
+                    device="cpu",
+                )
+                ts_mask = seg_service.load_body_mask(
+                    series_uid=series_uid,
+                    task="body",
+                    target_shape=hu_volume.shape
+                )
+                if ts_mask is not None and ts_mask.shape == hu_volume.shape and np.any(ts_mask):
+                    patient_body_mask = ts_mask
+                    raw_objects = hu_volume > -500
+                    accessory_table_mask = raw_objects & ~patient_body_mask
+            except Exception as exc:
+                import logging
+                logging.getLogger(__name__).warning(
+                    "TotalSegmentator failed or unavailable for series %s: %s. "
+                    "Falling back to rule-based body segmentation.",
+                    series_uid, exc
+                )
+
+        if patient_body_mask is None:
+            patient_body_mask, accessory_table_mask = segment_patient_and_accessories(
+                hu_volume,
+                tissue_threshold_hu=-300,
+                pixel_spacing=pixel_spacing
+            )
+
         interior_mask = patient_body_mask
 
         # Track validated empty slices where the mask is completely False
