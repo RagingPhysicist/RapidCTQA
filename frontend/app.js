@@ -62,7 +62,7 @@ function _renderSeriesRow(tbody, study) {
       <div class="actions-cell">
         <button class="view-btn" onclick="viewStudy('${study.series_uid}')">View Report</button>
         <button class="view-btn" style="background: var(--secondary);" onclick="launchCockpit('${study.series_uid}')">View Scan</button>
-        <button class="btn-segment" onclick="runSegmentation('${study.series_uid}', null)" title="Run TotalSegmentator body segmentation">🫁 Segment</button>
+        <button class="btn-segment" onclick="runSegmentation('${study.series_uid}', null)" title="Run full TotalSegmentator segmentation">🫁 Segment Full</button>
       </div>
     </td>
   `;
@@ -150,8 +150,8 @@ async function runSegmentation(seriesUid, encodedGroupId) {
   if (!seriesUid) { alert('No series selected for segmentation.'); return; }
 
   const msg = encodedGroupId
-    ? `Run TotalSegmentator body segmentation on the 4DCT reference phase?\n\n(Phase UID: ${seriesUid.substring(0, 20)}…)`
-    : `Run TotalSegmentator body segmentation on this series?`;
+    ? `Run full TotalSegmentator segmentation (task=total) on the 4DCT reference phase?\n\n(Phase UID: ${seriesUid.substring(0, 20)}…)`
+    : `Run full TotalSegmentator segmentation (task=total) on this series?`;
 
   if (!confirm(msg)) return;
 
@@ -163,7 +163,7 @@ async function runSegmentation(seriesUid, encodedGroupId) {
     const res = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ task: 'body', device: 'cpu', fast: true, force: false }),
+      body: JSON.stringify({ task: 'total', device: 'cpu', fast: true, force: false }),
     });
     const data = await res.json();
     if (res.ok) {
@@ -188,14 +188,14 @@ async function _updateCockpitSegmentationStatus(seriesUid) {
     if (res.ok) {
       const data = await res.json();
       if (data.available) {
-        statusEl.innerHTML = '<span class="badge badge-accept">● Body Mask Available</span>';
-        btn.textContent = '🔄 Re-run Body Segmentation';
+        statusEl.innerHTML = '<span class="badge badge-accept">● Segmentation Available</span>';
+        btn.textContent = '🔄 Re-run Full Segmentation';
       } else if (!data.totalsegmentator_installed) {
         statusEl.innerHTML = '<span style="color:var(--text-muted)">TotalSegmentator not installed</span>';
-        btn.textContent = '🫁 Run Body Segmentation';
+        btn.textContent = '🫁 Run Full Segmentation';
       } else {
         statusEl.textContent = 'Ready to segment';
-        btn.textContent = '🫁 Run Body Segmentation';
+        btn.textContent = '🫁 Run Full Segmentation';
       }
     }
   } catch (e) {
@@ -209,13 +209,13 @@ async function runCockpitSegmentation() {
   const statusEl = document.getElementById('cockpit-segment-status');
   const btn = document.getElementById('cockpit-segment-btn');
   if (btn) btn.disabled = true;
-  if (statusEl) statusEl.textContent = 'Starting segmentation in background...';
+  if (statusEl) statusEl.textContent = 'Starting full segmentation in background...';
 
   try {
     const res = await fetch(`${API_BASE}/viewer/${seriesUid}/segment`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ task: 'body', device: 'cpu', fast: true, force: false }),
+      body: JSON.stringify({ task: 'total', device: 'cpu', fast: true, force: false }),
     });
     const data = await res.json();
     if (res.ok) {
