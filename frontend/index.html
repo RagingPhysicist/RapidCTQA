@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>RapidCTQA Portal | RT CT Pre-Contour QA</title>
-  <link rel="stylesheet" href="/static/style.css?v=3">
+  <link rel="stylesheet" href="/static/style.css?v=1.5.1">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet">
@@ -37,6 +37,12 @@
         <div class="card">
           <div class="card-title">Processed Today</div>
           <div id="processed-today" class="card-value">0</div>
+        </div>
+        <div class="card">
+          <div class="card-title">TotalSegmentator</div>
+          <div id="totalsegmentator-status" class="card-value" style="font-size: 1.15rem; font-weight: 600; margin-top: 0.35rem;">
+            <span class="badge badge-pending">Checking...</span>
+          </div>
         </div>
       </div>
 
@@ -244,6 +250,17 @@
             <div id="cockpit-flags"></div>
           </section>
 
+          <!-- TotalSegmentator Section -->
+          <section class="cockpit-section" id="cockpit-totalseg-section">
+            <div class="cockpit-section-title">TOTALSEGMENTATOR AI</div>
+            <div style="display: flex; flex-direction: column; gap: 0.5rem; margin-top: 0.5rem;">
+              <button id="cockpit-segment-btn" class="btn-segment" style="width: 100%; justify-content: center;" onclick="runCockpitSegmentation()">
+                🫁 Run Body Segmentation
+              </button>
+              <div id="cockpit-segment-status" style="font-size: 0.75rem; color: var(--text-muted);"></div>
+            </div>
+          </section>
+
           <!-- Actions -->
           <section class="cockpit-actions">
             <button id="cockpit-approve-btn" class="cockpit-btn cockpit-btn-approve" onclick="cockpitApprove()">
@@ -259,6 +276,6 @@
     </div>
   </div>
 
-  <script src="/static/app.js?v=6"></script>
+  <script src="/static/app.js?v=1.5.1"></script>
 </body>
 </html>

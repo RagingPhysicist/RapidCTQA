@@ -11,6 +11,15 @@ async function fetchStatus() {
     cockpitState.version = data.version;
     document.getElementById('connection-status').textContent = 'Connected';
     document.getElementById('connection-status').className = 'badge badge-accept';
+
+    const tsEl = document.getElementById('totalsegmentator-status');
+    if (tsEl) {
+      if (data.totalsegmentator_installed) {
+        tsEl.innerHTML = '<span class="badge badge-accept" style="font-size:0.85rem;">● Installed &amp; Ready</span>';
+      } else {
+        tsEl.innerHTML = '<span class="badge badge-reject" style="font-size:0.85rem;">○ Not Installed</span>';
+      }
+    }
   } catch (error) {
     console.error('Failed to fetch status:', error);
     document.getElementById('connection-status').textContent = 'Offline';
@@ -18,32 +27,207 @@ async function fetchStatus() {
   }
 }
 
+// ── Study table rendering ─────────────────────────────────────────
+// Tracks which 4DCT groups are expanded in the table
+const expandedGroups = new Set();
+
 async function fetchStudies() {
   try {
     const response = await fetch(`${API_BASE}/studies`);
-    const studies = await response.json();
+    const items = await response.json();
     const tbody = document.getElementById('study-table-body');
     tbody.innerHTML = '';
 
-    studies.forEach(study => {
-      const tr = document.createElement('tr');
-      tr.innerHTML = `
-        <td style="font-weight: 600;">${study.patient_name}</td>
-        <td style="color: var(--text-muted); font-size: 0.875rem;">${study.protocol}</td>
-        <td style="font-family: monospace; font-size: 0.75rem;">${study.series_uid.substring(0, 16)}...</td>
-        <td>${study.instance_count}</td>
-        <td><span class="badge badge-${study.status.toLowerCase()}">${study.status}</span></td>
-        <td>
-          <div class="actions-cell">
-            <button class="view-btn" onclick="viewStudy('${study.series_uid}')">View Report</button>
-            <button class="view-btn" style="background: var(--secondary);" onclick="launchCockpit('${study.series_uid}')">View Scan</button>
-          </div>
-        </td>
-      `;
-      tbody.appendChild(tr);
+    items.forEach(item => {
+      if (item.type === '4dct_group') {
+        _render4DCTGroup(tbody, item);
+      } else {
+        _renderSeriesRow(tbody, item);
+      }
     });
   } catch (error) {
     console.error('Failed to fetch studies:', error);
+  }
+}
+
+function _renderSeriesRow(tbody, study) {
+  const tr = document.createElement('tr');
+  tr.innerHTML = `
+    <td style="font-weight: 600;">${study.patient_name}</td>
+    <td style="color: var(--text-muted); font-size: 0.875rem;">${study.protocol || '—'}</td>
+    <td style="font-family: monospace; font-size: 0.75rem;">${(study.series_uid || '').substring(0, 16)}...</td>
+    <td>${study.instance_count}</td>
+    <td><span class="badge badge-${(study.status || 'pending').toLowerCase()}">${study.status}</span></td>
+    <td>
+      <div class="actions-cell">
+        <button class="view-btn" onclick="viewStudy('${study.series_uid}')">View Report</button>
+        <button class="view-btn" style="background: var(--secondary);" onclick="launchCockpit('${study.series_uid}')">View Scan</button>
+        <button class="btn-segment" onclick="runSegmentation('${study.series_uid}', null)" title="Run TotalSegmentator body segmentation">🫁 Segment</button>
+      </div>
+    </td>
+  `;
+  tbody.appendChild(tr);
+}
+
+function _render4DCTGroup(tbody, group) {
+  const isExpanded = expandedGroups.has(group.group_id);
+  const escapedGroupId = encodeURIComponent(group.group_id);
+
+  // ── Header row ───────────────────────────────────────────────────
+  const headerTr = document.createElement('tr');
+  headerTr.classList.add('fourdct-header-row');
+  headerTr.dataset.groupId = group.group_id;
+  headerTr.innerHTML = `
+    <td style="font-weight: 700;">
+      <span style="color: var(--primary); margin-right: 0.4rem;">⊕</span>
+      ${group.patient_name}
+    </td>
+    <td style="color: var(--text-muted); font-size: 0.875rem;">
+      <span style="font-weight:600; color: var(--primary);">4DCT</span>
+      ${group.series_description ? '· ' + group.series_description : ''}
+    </td>
+    <td style="font-family: monospace; font-size: 0.75rem;">${group.phase_count} phases</td>
+    <td>${group.instance_count}</td>
+    <td><span class="badge badge-${(group.status || 'pending').toLowerCase()}">${group.status}</span></td>
+    <td>
+      <div class="actions-cell">
+        <button class="view-btn" style="background: var(--secondary);"
+          onclick="toggle4DCTGroup(this, '${group.group_id}')">
+          ${isExpanded ? '▲ Collapse' : `▼ ${group.phase_count} Phases`}
+        </button>
+        <button class="btn-segment"
+          onclick="runSegmentation('${group.reference_phase_uid}', '${escapedGroupId}')"
+          title="Run TotalSegmentator on reference phase (${group.reference_phase_uid.substring(0, 12)}…)">
+          🫁 Segment 4D Ref
+        </button>
+      </div>
+    </td>
+  `;
+  tbody.appendChild(headerTr);
+
+  // ── Phase sub-rows (hidden by default) ───────────────────────────
+  (group.phases || []).forEach((phase, idx) => {
+    const phaseTr = document.createElement('tr');
+    phaseTr.classList.add('fourdct-phase-row');
+    phaseTr.dataset.parentGroup = group.group_id;
+    phaseTr.style.display = isExpanded ? '' : 'none';
+    const isRef = (phase.series_uid === group.reference_phase_uid);
+    phaseTr.innerHTML = `
+      <td style="padding-left: 2.5rem; color: var(--text-muted); font-size: 0.85rem;">
+        ${isRef ? '<span title="Reference phase for segmentation" style="color:var(--primary);">★ </span>' : ''}
+        ${phase.phase_label}
+      </td>
+      <td style="font-size: 0.8rem; color: var(--text-muted);">Temporal pos. ${phase.temporal_position}</td>
+      <td style="font-family: monospace; font-size: 0.7rem;">${(phase.series_uid || '').substring(0, 16)}…</td>
+      <td>${phase.instance_count}</td>
+      <td><span class="badge badge-${(phase.status || 'pending').toLowerCase()}">${phase.status}</span></td>
+      <td>
+        <button class="view-btn" style="background: var(--secondary); font-size: 0.8rem;"
+          onclick="launchCockpit('${phase.series_uid}')">View Scan</button>
+      </td>
+    `;
+    tbody.appendChild(phaseTr);
+  });
+}
+
+function toggle4DCTGroup(btn, groupId) {
+  const isNowExpanded = !expandedGroups.has(groupId);
+  if (isNowExpanded) {
+    expandedGroups.add(groupId);
+  } else {
+    expandedGroups.delete(groupId);
+  }
+
+  // Show/hide phase rows
+  document.querySelectorAll(`[data-parent-group="${CSS.escape(groupId)}"]`).forEach(row => {
+    row.style.display = isNowExpanded ? '' : 'none';
+  });
+
+  btn.textContent = isNowExpanded ? '▲ Collapse' : '▼ Phases';
+}
+
+async function runSegmentation(seriesUid, encodedGroupId) {
+  if (!seriesUid) { alert('No series selected for segmentation.'); return; }
+
+  const msg = encodedGroupId
+    ? `Run TotalSegmentator body segmentation on the 4DCT reference phase?\n\n(Phase UID: ${seriesUid.substring(0, 20)}…)`
+    : `Run TotalSegmentator body segmentation on this series?`;
+
+  if (!confirm(msg)) return;
+
+  const url = encodedGroupId
+    ? `${API_BASE}/studies/group/${decodeURIComponent(encodedGroupId)}/segment`
+    : `${API_BASE}/viewer/${seriesUid}/segment`;
+
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ task: 'body', device: 'cpu', fast: true, force: false }),
+    });
+    const data = await res.json();
+    if (res.ok) {
+      alert(data.message || 'Segmentation started in background.');
+    } else if (res.status === 503) {
+      alert('⚠ TotalSegmentator is not installed.\n\nInstall it with:\n  pip install TotalSegmentator torch');
+    } else {
+      alert(`Segmentation request failed: ${data.detail || res.statusText}`);
+    }
+  } catch (err) {
+    alert(`Network error: ${err}`);
+  }
+}
+
+async function _updateCockpitSegmentationStatus(seriesUid) {
+  const statusEl = document.getElementById('cockpit-segment-status');
+  const btn = document.getElementById('cockpit-segment-btn');
+  if (!statusEl || !btn) return;
+
+  try {
+    const res = await fetch(`${API_BASE}/viewer/${seriesUid}/segmentation`);
+    if (res.ok) {
+      const data = await res.json();
+      if (data.available) {
+        statusEl.innerHTML = '<span class="badge badge-accept">● Body Mask Available</span>';
+        btn.textContent = '🔄 Re-run Body Segmentation';
+      } else if (!data.totalsegmentator_installed) {
+        statusEl.innerHTML = '<span style="color:var(--text-muted)">TotalSegmentator not installed</span>';
+        btn.textContent = '🫁 Run Body Segmentation';
+      } else {
+        statusEl.textContent = 'Ready to segment';
+        btn.textContent = '🫁 Run Body Segmentation';
+      }
+    }
+  } catch (e) {
+    statusEl.textContent = '';
+  }
+}
+
+async function runCockpitSegmentation() {
+  const seriesUid = cockpitState.seriesUid;
+  if (!seriesUid) return;
+  const statusEl = document.getElementById('cockpit-segment-status');
+  const btn = document.getElementById('cockpit-segment-btn');
+  if (btn) btn.disabled = true;
+  if (statusEl) statusEl.textContent = 'Starting segmentation in background...';
+
+  try {
+    const res = await fetch(`${API_BASE}/viewer/${seriesUid}/segment`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ task: 'body', device: 'cpu', fast: true, force: false }),
+    });
+    const data = await res.json();
+    if (res.ok) {
+      if (statusEl) statusEl.innerHTML = '<span class="badge badge-ingesting">● Processing segmentation...</span>';
+      setTimeout(() => _updateCockpitSegmentationStatus(seriesUid), 5000);
+    } else {
+      if (statusEl) statusEl.textContent = data.detail || 'Segmentation failed to start';
+    }
+  } catch (err) {
+    if (statusEl) statusEl.textContent = `Error: ${err.message}`;
+  } finally {
+    if (btn) btn.disabled = false;
   }
 }
 
@@ -223,6 +407,7 @@ async function launchCockpit(seriesUid) {
 
     _setCockpitButtonsEnabled(true);
     refreshCockpitSlice();
+    _updateCockpitSegmentationStatus(seriesUid);
   } catch (err) {
     console.error('Cockpit load failed:', err);
     document.getElementById('cockpit-patient-name').textContent = 'Error loading series';

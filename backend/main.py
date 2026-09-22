@@ -14,27 +14,31 @@ import threading
 import yaml
 import platform
 from concurrent.futures import ThreadPoolExecutor
-from typing import List, Dict, Optional
+from typing import Any, List, Dict, Optional, Union
 import numpy as np
 from PIL import Image
 from backend.utils import segment_patient_body_only
 try:
-    from .models import QAResult, StudySummary, IngestionStatus
+    from .models import QAResult, StudySummary, IngestionStatus, FourDCTSummary, TemporalPhaseInfo, SegmentationRequest
     from .engine import QAEngine
     from .listener import DicomListener
     from .reporter import generate_pdf_report
     from .dicom_sender import send_dicom_series
     from .logger import log_qa_result, query_logs, export_logs_csv
+    from .fourdct import detect_fourdct_groups, FourDCTGroup
+    from .segmentation import SegmentationService, SegmentationNotAvailableError, SegmentationError
 except ImportError:
     import sys
     # Add root folder to sys.path when running main.py directly
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from backend.models import QAResult, StudySummary, IngestionStatus
+    from backend.models import QAResult, StudySummary, IngestionStatus, FourDCTSummary, TemporalPhaseInfo, SegmentationRequest
     from backend.engine import QAEngine
     from backend.listener import DicomListener
     from backend.reporter import generate_pdf_report
     from backend.dicom_sender import send_dicom_series
     from backend.logger import log_qa_result, query_logs, export_logs_csv
+    from backend.fourdct import detect_fourdct_groups, FourDCTGroup
+    from backend.segmentation import SegmentationService, SegmentationNotAvailableError, SegmentationError
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -151,6 +155,14 @@ results_cache_lock = threading.Lock()
 
 # Pool for concurrent series analysis (IO + CPU-bound work per series)
 analysis_pool = ThreadPoolExecutor(max_workers=4)
+
+# Segmentation service (TotalSegmentator adapter)
+segmentation_service = SegmentationService(storage_dir=STORAGE_DIR)
+
+# Cache of detected 4DCT groups: group_id → FourDCTGroup
+# Rebuilt on each /api/studies call; used for group-level endpoints.
+fourdct_cache: Dict[str, FourDCTGroup] = {}
+fourdct_cache_lock = threading.Lock()
 
 # Serve frontend
 @app.get("/")
@@ -283,21 +295,37 @@ async def get_status():
         version=str(config_web.get("app", {}).get("version", "0.0")),
         active_transfers=0,
         queue_size=len(results_cache),
-        processed_today=len(results_cache)
+        processed_today=len(results_cache),
+        totalsegmentator_installed=segmentation_service.is_available,
     )
 
-@app.get("/api/studies", response_model=List[StudySummary])
-async def get_studies(background_tasks: BackgroundTasks):
-    summaries = []
+@app.get("/api/studies")
+async def get_studies(background_tasks: BackgroundTasks) -> List[Any]:
+    """
+    Return a list of study summaries.
+
+    Each item is one of:
+      - {"type": "series", ...}     — a plain CT series (StudySummary)
+      - {"type": "4dct_group", ...} — a logical 4DCT group (FourDCTSummary)
+
+    This shape change is backward-compatible: existing "type": "series" objects
+    carry the same fields as before; only a new "type" discriminator is added.
+    """
+    # ── 1. Collect per-series summaries ──────────────────────────────────────
+    series_dirs: Dict[str, str] = {}
+    raw_summaries: Dict[str, StudySummary] = {}
+
     for series_uid in os.listdir(STORAGE_DIR):
         study_path = os.path.join(STORAGE_DIR, series_uid)
         if not os.path.isdir(study_path):
             continue
-            
+
         files = glob.glob(os.path.join(study_path, "*.dcm"))
         if not files:
             continue
-            
+
+        series_dirs[series_uid] = study_path
+
         # Use cached result if available for core fields
         cached_res = results_cache.get(series_uid)
 
@@ -313,11 +341,9 @@ async def get_studies(background_tasks: BackgroundTasks):
         # Find first CT file for remaining metadata if needed
         metadata_found = False
         if not cached_res or protocol == "Unknown" or patient_id == "Unknown":
-            # Sort files to be somewhat deterministic, but try to find a CT slice
             for f in sorted(files):
                 try:
                     ds = pydicom.dcmread(f, stop_before_pixels=True)
-                    # Prefer CT Image Storage
                     if getattr(ds, 'SOPClassUID', '') == '1.2.840.10008.5.1.4.1.1.2':
                         patient_name = str(getattr(ds, 'PatientName', patient_name))
                         protocol = str(getattr(ds, 'ProtocolName', protocol))
@@ -328,24 +354,25 @@ async def get_studies(background_tasks: BackgroundTasks):
                 except Exception:
                     continue
 
-            # Fallback to first file if no CT found
-            if not metadata_found:
-                ds = pydicom.dcmread(files[0], stop_before_pixels=True)
-                patient_name = str(getattr(ds, 'PatientName', patient_name))
-                protocol = str(getattr(ds, 'ProtocolName', protocol))
-                patient_id = str(getattr(ds, 'PatientID', 'Unknown'))
-                study_date = str(getattr(ds, 'StudyDate', 'Unknown'))
-        
+            if not metadata_found and files:
+                try:
+                    ds = pydicom.dcmread(files[0], stop_before_pixels=True)
+                    patient_name = str(getattr(ds, 'PatientName', patient_name))
+                    protocol = str(getattr(ds, 'ProtocolName', protocol))
+                    patient_id = str(getattr(ds, 'PatientID', 'Unknown'))
+                    study_date = str(getattr(ds, 'StudyDate', 'Unknown'))
+                except Exception:
+                    pass
+
         status = "PENDING"
         if listener.is_ingesting(series_uid):
             status = "INGESTING"
         elif series_uid in results_cache:
             status = results_cache[series_uid].status
         else:
-            # Trigger analysis in background if not already cached
             background_tasks.add_task(on_series_received, series_uid)
-        
-        summaries.append(StudySummary(
+
+        raw_summaries[series_uid] = StudySummary(
             series_uid=series_uid,
             patient_name=patient_name,
             patient_id=patient_id,
@@ -353,8 +380,20 @@ async def get_studies(background_tasks: BackgroundTasks):
             study_date=study_date,
             modality="CT",
             status=status,
-            instance_count=len(files)
-        ))
+            instance_count=len(files),
+        )
+
+    # ── 2. Detect 4DCT groups ─────────────────────────────────────────────────
+    groups, plain_uids = detect_fourdct_groups(series_dirs)
+
+    # Update the fourdct_cache so group-level endpoints can look up groups
+    with fourdct_cache_lock:
+        fourdct_cache.clear()
+        for g in groups:
+            fourdct_cache[g.group_id] = g
+
+    # ── 3. Build the response list ────────────────────────────────────────────
+    result_items: List[Any] = []
     status_priority = {
         "REJECT": 0,
         "FAIL_CRITICAL": 0,
@@ -364,10 +403,70 @@ async def get_studies(background_tasks: BackgroundTasks):
         "PASS": 2,
         "SKIPPED": 3,
         "PENDING": 4,
-        "INGESTING": 5
+        "INGESTING": 5,
     }
-    summaries.sort(key=lambda s: status_priority.get(s.status.upper(), 99))
-    return summaries
+
+    # Plain series
+    for uid in plain_uids:
+        if uid in raw_summaries:
+            result_items.append(raw_summaries[uid])
+
+    # 4DCT groups — synthesise FourDCTSummary from cached per-phase QA results
+    for group in groups:
+        phase_infos: List[TemporalPhaseInfo] = []
+        phase_statuses: List[str] = []
+        for phase in group.phases:
+            phase_status = "PENDING"
+            if listener.is_ingesting(phase.series_uid):
+                phase_status = "INGESTING"
+            elif phase.series_uid in results_cache:
+                phase_status = results_cache[phase.series_uid].status
+            else:
+                # Trigger analysis for ungrouped phases that haven't been processed
+                background_tasks.add_task(on_series_received, phase.series_uid)
+
+            phase_infos.append(TemporalPhaseInfo(
+                series_uid=phase.series_uid,
+                temporal_position=phase.temporal_position,
+                phase_label=phase.phase_label,
+                instance_count=phase.instance_count,
+                status=phase_status,
+            ))
+            phase_statuses.append(phase_status)
+
+        # Aggregate group status: worst status wins
+        group_status = min(
+            phase_statuses or ["PENDING"],
+            key=lambda s: status_priority.get(s.upper(), 99),
+        )
+
+        result_items.append(FourDCTSummary(
+            group_id=group.group_id,
+            study_instance_uid=group.study_instance_uid,
+            frame_of_reference_uid=group.frame_of_reference_uid,
+            patient_name=group.patient_name,
+            patient_id=group.patient_id,
+            study_date=group.study_date,
+            series_description=group.series_description,
+            phase_count=group.phase_count,
+            reference_phase_uid=group.reference_phase_uid,
+            status=group_status,
+            modality="CT",
+            instance_count=group.instance_count,
+            phases=phase_infos,
+        ))
+
+    def _status_sort_key(item: Any) -> int:
+        if isinstance(item, StudySummary):
+            return status_priority.get(item.status.upper(), 99)
+        if isinstance(item, FourDCTSummary):
+            return status_priority.get(item.status.upper(), 99)
+        return 99
+
+    result_items.sort(key=_status_sort_key)
+
+    # Return as plain dicts so FastAPI serialises both types correctly
+    return [item.dict() for item in result_items]
 
 @app.get("/api/studies/{series_uid}", response_model=QAResult)
 async def get_study_detail(series_uid: str):
@@ -377,11 +476,52 @@ async def get_study_detail(series_uid: str):
         dicom_files = glob.glob(os.path.join(study_path, "*.dcm"))
         if dicom_files:
             on_series_received(series_uid)
-            
+
     if series_uid in results_cache:
         return results_cache[series_uid]
-    
+
     raise HTTPException(status_code=404, detail="Study not found or not yet processed")
+
+
+@app.get("/api/studies/group/{group_id:path}")
+async def get_group_detail(group_id: str):
+    """Return full FourDCTSummary for a detected 4DCT group including per-phase QA status."""
+    with fourdct_cache_lock:
+        group = fourdct_cache.get(group_id)
+    if group is None:
+        raise HTTPException(status_code=404, detail="4DCT group not found. Refresh the study list first.")
+
+    phase_infos: List[TemporalPhaseInfo] = []
+    for phase in group.phases:
+        phase_status = "PENDING"
+        if listener.is_ingesting(phase.series_uid):
+            phase_status = "INGESTING"
+        elif phase.series_uid in results_cache:
+            phase_status = results_cache[phase.series_uid].status
+
+        phase_infos.append(TemporalPhaseInfo(
+            series_uid=phase.series_uid,
+            temporal_position=phase.temporal_position,
+            phase_label=phase.phase_label,
+            instance_count=phase.instance_count,
+            status=phase_status,
+        ))
+
+    return FourDCTSummary(
+        group_id=group.group_id,
+        study_instance_uid=group.study_instance_uid,
+        frame_of_reference_uid=group.frame_of_reference_uid,
+        patient_name=group.patient_name,
+        patient_id=group.patient_id,
+        study_date=group.study_date,
+        series_description=group.series_description,
+        phase_count=group.phase_count,
+        reference_phase_uid=group.reference_phase_uid,
+        status="PENDING",
+        modality="CT",
+        instance_count=group.instance_count,
+        phases=phase_infos,
+    ).dict()
 
 @app.post("/api/validate/{series_uid}")
 async def run_validation(series_uid: str, background_tasks: BackgroundTasks):
@@ -605,6 +745,146 @@ async def viewer_slice(
         raise HTTPException(status_code=500, detail=f"Slice render failed: {e}")
 
     return StreamingResponse(io.BytesIO(png_bytes), media_type="image/png")
+
+
+@app.post("/api/viewer/{series_uid}/segment")
+async def segment_series(
+    series_uid: str,
+    req: SegmentationRequest,
+    background_tasks: BackgroundTasks,
+):
+    """
+    Trigger TotalSegmentator body segmentation for a single CT series.
+    For a 4DCT acquisition, call this with the reference_phase_uid.
+    """
+    study_path = os.path.join(STORAGE_DIR, series_uid)
+    if not os.path.isdir(study_path):
+        raise HTTPException(status_code=404, detail="Series not found")
+
+    if not segmentation_service.is_available:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "TotalSegmentator is not installed. "
+                "Run: pip install TotalSegmentator torch"
+            ),
+        )
+
+    def _run_segmentation():
+        try:
+            result = segmentation_service.run_body_segmentation(
+                series_uid=series_uid,
+                task=req.task,
+                device=req.device,
+                fast=req.fast,
+                force=req.force,
+                on_progress=lambda msg: print(f"[Segmentation {series_uid}] {msg}"),
+            )
+            # Store segmentation metadata in the series QA result metrics
+            with results_cache_lock:
+                if series_uid in results_cache:
+                    results_cache[series_uid].metrics["segmentation"] = result.to_dict()
+            print(f"Segmentation complete for {series_uid}: {len(result.mask_files)} masks")
+        except SegmentationError as exc:
+            print(f"Segmentation failed for {series_uid}: {exc}")
+        except Exception as exc:
+            print(f"Unexpected segmentation error for {series_uid}: {exc}")
+
+    background_tasks.add_task(_run_segmentation)
+    return {
+        "message": f"Segmentation (task={req.task}) started for series {series_uid}",
+        "series_uid": series_uid,
+        "task": req.task,
+    }
+
+
+@app.post("/api/studies/group/{group_id:path}/segment")
+async def segment_group(
+    group_id: str,
+    req: SegmentationRequest,
+    background_tasks: BackgroundTasks,
+):
+    """
+    Trigger TotalSegmentator body segmentation for a 4DCT group.
+    Automatically uses the group's reference phase as input.
+    Runs once — NOT on all temporal phases.
+    """
+    with fourdct_cache_lock:
+        group = fourdct_cache.get(group_id)
+    if group is None:
+        raise HTTPException(
+            status_code=404,
+            detail="4DCT group not found. Refresh the study list first."
+        )
+
+    ref_uid = group.reference_phase_uid
+    if not ref_uid:
+        raise HTTPException(status_code=422, detail="No reference phase defined for this group.")
+
+    study_path = os.path.join(STORAGE_DIR, ref_uid)
+    if not os.path.isdir(study_path):
+        raise HTTPException(status_code=404, detail=f"Reference phase directory not found: {ref_uid}")
+
+    if not segmentation_service.is_available:
+        raise HTTPException(
+            status_code=503,
+            detail="TotalSegmentator is not installed. Run: pip install TotalSegmentator torch",
+        )
+
+    def _run_group_segmentation():
+        try:
+            result = segmentation_service.run_body_segmentation(
+                series_uid=ref_uid,
+                task=req.task,
+                device=req.device,
+                fast=req.fast,
+                force=req.force,
+                on_progress=lambda msg: print(f"[Segmentation group={group_id}] {msg}"),
+            )
+            with results_cache_lock:
+                if ref_uid in results_cache:
+                    results_cache[ref_uid].metrics["segmentation"] = result.to_dict()
+                    results_cache[ref_uid].metrics["segmentation_is_4dct_reference"] = True
+            print(
+                f"Group segmentation complete for {group_id} "
+                f"(reference phase: {ref_uid}): {len(result.mask_files)} masks"
+            )
+        except SegmentationError as exc:
+            print(f"Group segmentation failed for {group_id}: {exc}")
+        except Exception as exc:
+            print(f"Unexpected group segmentation error for {group_id}: {exc}")
+
+    background_tasks.add_task(_run_group_segmentation)
+    return {
+        "message": f"Segmentation (task={req.task}) started for 4DCT group",
+        "group_id": group_id,
+        "reference_phase_uid": ref_uid,
+        "task": req.task,
+    }
+
+
+@app.get("/api/viewer/{series_uid}/segmentation")
+async def get_segmentation_status(series_uid: str):
+    """Return segmentation metadata for a series if available."""
+    study_path = os.path.join(STORAGE_DIR, series_uid)
+    if not os.path.isdir(study_path):
+        raise HTTPException(status_code=404, detail="Series not found")
+
+    with results_cache_lock:
+        cached = results_cache.get(series_uid)
+        if cached and "segmentation" in cached.metrics:
+            return {"available": True, "segmentation": cached.metrics["segmentation"]}
+
+    # Check disk directly (may exist without being in cache)
+    seg_available = segmentation_service.is_available
+    base_seg_dir = os.path.join(study_path, "segmentations")
+    if os.path.isdir(base_seg_dir):
+        tasks_found = [t for t in os.listdir(base_seg_dir)
+                       if os.path.isdir(os.path.join(base_seg_dir, t))]
+        if tasks_found:
+            return {"available": True, "tasks": tasks_found}
+
+    return {"available": False, "totalsegmentator_installed": seg_available}
 
 
 @app.post("/api/viewer/{series_uid}/approve")

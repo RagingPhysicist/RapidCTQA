@@ -13,3 +13,5 @@ matplotlib
 scikit-image
 pytest
 pytest-asyncio
+# Optional: for AI-based body segmentation (CPU: pip install TotalSegmentator, GPU: pip install TotalSegmentator torch)
+# totalsegmentator
