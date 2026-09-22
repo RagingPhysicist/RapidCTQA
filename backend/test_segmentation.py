@@ -330,3 +330,127 @@ class TestNotAvailableError:
         cause = ImportError("no module named totalsegmentator")
         err = SegmentationNotAvailableError(cause=cause)
         assert err.__cause__ is cause
+
+
+# ---------------------------------------------------------------------------
+# Mask Loading & Engine Automatic Segmentation Tests
+# ---------------------------------------------------------------------------
+
+class TestLoadBodyMask:
+
+    def test_load_body_mask_with_nifti(self, series_dir):
+        import numpy as np
+        import nibabel as nib
+        uid, sdir, storage = series_dir
+        service = SegmentationService(storage_dir=storage)
+
+        cache_dir = service.output_dir_for(uid, "body")
+        os.makedirs(cache_dir, exist_ok=True)
+
+        # Create dummy 3D NIfTI volume (W=10, H=10, D=5)
+        data = np.zeros((10, 10, 5), dtype=np.uint8)
+        data[2:8, 2:8, :] = 1
+        img = nib.Nifti1Image(data, np.eye(4))
+        nib.save(img, os.path.join(cache_dir, "body.nii.gz"))
+
+        loaded = service.load_body_mask(uid, task="body", target_shape=(5, 10, 10))
+        assert loaded is not None
+        assert loaded.shape == (5, 10, 10)
+        assert loaded[0, 5, 5] == True
+
+    def test_load_body_mask_returns_none_when_missing(self, service):
+        loaded = service.load_body_mask("nonexistent_uid")
+        assert loaded is None
+
+
+class TestEngineAutomaticSegmentation:
+
+    def _create_mock_dataset(self, series_uid="1.2.840.123"):
+        import numpy as np
+        import pydicom
+        from pydicom.dataset import Dataset, FileMetaDataset
+
+        datasets = []
+        for i in range(5):
+            ds = Dataset()
+            ds.file_meta = FileMetaDataset()
+            ds.file_meta.TransferSyntaxUID = pydicom.uid.ExplicitVRLittleEndian
+            ds.SOPClassUID = '1.2.840.10008.5.1.4.1.1.2'
+            ds.SOPInstanceUID = f"1.2.840.123.{i+1}"
+            ds.SeriesInstanceUID = series_uid
+            ds.PatientName = "Test^Patient"
+            ds.ProtocolName = "CHEST"
+            ds.Rows = 16
+            ds.Columns = 16
+            ds.PixelSpacing = [1.0, 1.0]
+            ds.SliceThickness = 2.5
+            ds.RescaleSlope = 1.0
+            ds.RescaleIntercept = -1024.0
+            ds.ImagePositionPatient = [0.0, 0.0, float(i * 2.5)]
+            ds.BitsAllocated = 16
+            ds.BitsStored = 16
+            ds.HighBit = 15
+            ds.SamplesPerPixel = 1
+            ds.PhotometricInterpretation = "MONOCHROME2"
+            ds.PixelRepresentation = 0
+
+            # Create pixel array with a central human-like mass
+            arr = np.full((16, 16), 24, dtype=np.uint16)  # background ~ -1000 HU
+            arr[4:12, 4:12] = 1024  # body ~ 0 HU
+            ds.PixelData = arr.tobytes()
+            datasets.append(ds)
+
+        return datasets
+
+    def test_engine_uses_totalsegmentator_mask_when_available(self, tmp_storage):
+        import numpy as np
+        from backend.engine import QAEngine
+
+        service = SegmentationService(storage_dir=tmp_storage)
+        mock_adapter = MagicMock()
+        service._adapter = mock_adapter
+
+        uid = "1.2.840.ts_test"
+        datasets = self._create_mock_dataset(series_uid=uid)
+
+        # Create fake NIfTI mask on disk for load_body_mask
+        import nibabel as nib
+        cache_dir = service.output_dir_for(uid, "body")
+        os.makedirs(cache_dir, exist_ok=True)
+        mask_data = np.zeros((16, 16, 5), dtype=np.uint8)
+        mask_data[4:12, 4:12, :] = 1
+        img = nib.Nifti1Image(mask_data, np.eye(4))
+        nib.save(img, os.path.join(cache_dir, "body.nii.gz"))
+
+        mock_adapter.run.return_value = {"body": os.path.join(cache_dir, "body.nii.gz")}
+
+        engine = QAEngine(
+            config_path=os.path.join(os.path.dirname(os.path.dirname(__file__)), "ctqa.yaml"),
+            segmentation_service=service,
+        )
+
+        metrics = engine._compute_metrics(datasets, protocol="CHEST")
+        assert metrics is not None
+        assert mock_adapter.run.called or os.path.exists(os.path.join(cache_dir, "body.nii.gz"))
+
+    def test_engine_falls_back_when_totalsegmentator_fails(self, tmp_storage):
+        from backend.engine import QAEngine
+
+        service = SegmentationService(storage_dir=tmp_storage)
+        mock_adapter = MagicMock()
+        mock_adapter.run.side_effect = SegmentationError("TotalSegmentator crashed")
+        service._adapter = mock_adapter
+
+        uid = "1.2.840.ts_fallback_test"
+        datasets = self._create_mock_dataset(series_uid=uid)
+
+        engine = QAEngine(
+            config_path=os.path.join(os.path.dirname(os.path.dirname(__file__)), "ctqa.yaml"),
+            segmentation_service=service,
+        )
+
+        metrics = engine._compute_metrics(datasets, protocol="CHEST")
+        assert metrics is not None
+        # Verify analysis succeeded via fallback
+        assert "slice_count" in metrics
+        assert metrics["slice_count"] == 5

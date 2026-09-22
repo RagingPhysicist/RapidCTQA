@@ -148,16 +148,20 @@ def _cleanup_old_directories():
 
 _cleanup_old_directories()
 
-engine = QAEngine(os.path.join(ROOT_DIR, "ctqa.yaml"))
+# Segmentation service (TotalSegmentator adapter)
+segmentation_service = SegmentationService(storage_dir=STORAGE_DIR)
+
+engine = QAEngine(
+    os.path.join(ROOT_DIR, "ctqa.yaml"),
+    storage_dir=STORAGE_DIR,
+    segmentation_service=segmentation_service,
+)
 results_cache: Dict[str, QAResult] = {}
 ct_files_cache: Dict[str, List[str]] = {}
 results_cache_lock = threading.Lock()
 
 # Pool for concurrent series analysis (IO + CPU-bound work per series)
 analysis_pool = ThreadPoolExecutor(max_workers=4)
-
-# Segmentation service (TotalSegmentator adapter)
-segmentation_service = SegmentationService(storage_dir=STORAGE_DIR)
 
 # Cache of detected 4DCT groups: group_id → FourDCTGroup
 # Rebuilt on each /api/studies call; used for group-level endpoints.
@@ -646,7 +650,15 @@ async def viewer_info(series_uid: str):
     }
 
 
-def _render_slice_png(dcm_path: str, window_width: float, window_level: float, metal_threshold: float, reference_point: dict = None, show_mask: bool = False) -> bytes:
+def _render_slice_png(
+    dcm_path: str,
+    window_width: float,
+    window_level: float,
+    metal_threshold: float,
+    reference_point: dict = None,
+    show_mask: bool = False,
+    slice_mask: np.ndarray = None,
+) -> bytes:
     """Render a single DICOM slice as a PNG byte stream with W/L and optional metal overlay."""
     ds = pydicom.dcmread(dcm_path)
     img = ds.pixel_array.astype(np.float32)
@@ -665,7 +677,10 @@ def _render_slice_png(dcm_path: str, window_width: float, window_level: float, m
     # Patient mask overlay: show filled patient body contour as a light blue tint
     if show_mask:
         try:
-            filled_mask = segment_patient_body_only(img, tissue_threshold_hu=-300)
+            if slice_mask is not None and slice_mask.shape == img.shape and np.any(slice_mask):
+                filled_mask = slice_mask
+            else:
+                filled_mask = segment_patient_body_only(img, tissue_threshold_hu=-300)
             if np.any(filled_mask):
                 rgb[filled_mask] = (rgb[filled_mask].astype(np.float32) * 0.75 + np.array([50, 150, 250], dtype=np.float32) * 0.25).astype(np.uint8)
         except Exception as e:
@@ -730,6 +745,15 @@ async def viewer_slice(
     if series_uid in results_cache:
         reference_point = results_cache[series_uid].metrics.get("reference_point")
 
+    ts_slice_mask = None
+    if mask and segmentation_service:
+        try:
+            ts_3d_mask = segmentation_service.load_body_mask(series_uid)
+            if ts_3d_mask is not None and 0 <= index < ts_3d_mask.shape[0]:
+                ts_slice_mask = ts_3d_mask[index]
+        except Exception as e:
+            print(f"Error loading TotalSegmentator slice mask: {e}")
+
     try:
         png_bytes = await asyncio.get_event_loop().run_in_executor(
             analysis_pool,
@@ -740,6 +764,7 @@ async def viewer_slice(
             metal_threshold,
             reference_point,
             mask,
+            ts_slice_mask,
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Slice render failed: {e}")

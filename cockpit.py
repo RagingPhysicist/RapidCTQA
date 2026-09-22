@@ -201,6 +201,17 @@ class ClinicalTriageApp(ctk.CTk):
         self.wl_slider.set(0)
         self.wl_slider.pack(pady=(0, 10))
 
+        # TotalSegmentator Full Package Button
+        self.seg_btn = ctk.CTkButton(
+            self.sidebar,
+            text="🫁 RUN FULL SEGMENTATION",
+            fg_color="#17a2b8",
+            hover_color="#138496",
+            command=self.run_full_segmentation,
+            font=("Roboto", 12, "bold"),
+        )
+        self.seg_btn.pack(pady=10)
+
         # Right Panel: Viewer & Controls
         self.main_view = ctk.CTkFrame(self)
         self.main_view.pack(side="right", fill="both", expand=True, padx=10, pady=10)
@@ -332,6 +343,34 @@ class ClinicalTriageApp(ctk.CTk):
             self.current_series_path = None
             self.flag_box.delete("0.0", "end")
             self.after(1000, self.on_closing) # Brief delay to show rejection status
+
+    def run_full_segmentation(self):
+        if not self.current_series_uid:
+            self.flag_box.insert("end", "No series loaded for segmentation.\n")
+            return
+
+        series_uid = self.current_series_uid
+        self.flag_box.insert("end", f"\n[INFO] Starting full TotalSegmentator segmentation (task=total) for {series_uid}...\n")
+
+        def _worker():
+            try:
+                from backend.segmentation import SegmentationService
+                seg_service = SegmentationService(storage_dir=STORAGE_DIR)
+                if not seg_service.is_available:
+                    self.after(0, lambda: self.flag_box.insert("end", "[ERROR] TotalSegmentator is not installed.\n"))
+                    return
+
+                result = seg_service.run_body_segmentation(
+                    series_uid=series_uid,
+                    task="total",
+                    fast=True,
+                    device="cpu",
+                )
+                self.after(0, lambda: self.flag_box.insert("end", f"[SUCCESS] Full segmentation complete! Created {len(result.mask_files)} mask(s).\n"))
+            except Exception as exc:
+                self.after(0, lambda: self.flag_box.insert("end", f"[ERROR] Full segmentation failed: {exc}\n"))
+
+        threading.Thread(target=_worker, daemon=True).start()
 
 if __name__ == "__main__":
     app = ClinicalTriageApp()
