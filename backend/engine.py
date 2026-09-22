@@ -201,6 +201,7 @@ class QAEngine:
 
         patient_body_mask = None
         accessory_table_mask = None
+        used_totalsegmentator = False
 
         # Determine SegmentationService to use
         seg_service = self.segmentation_service
@@ -234,6 +235,7 @@ class QAEngine:
                     patient_body_mask = ts_mask
                     raw_objects = hu_volume > -500
                     accessory_table_mask = raw_objects & ~patient_body_mask
+                    used_totalsegmentator = True
             except Exception as exc:
                 import logging
                 logging.getLogger(__name__).warning(
@@ -344,7 +346,8 @@ class QAEngine:
                     tolerated_truncated_slices.append(i + 1)
 
             # Stage B: Standalone Accessory / Table Truncation Check (Non-Critical Warning Condition B)
-            if not patient_truncated_this_slice:
+            # If TotalSegmentator was used, accessories do not count / trigger warnings
+            if not patient_truncated_this_slice and not used_totalsegmentator:
                 acc_trunc_y, acc_trunc_x = np.where(accessory_table_mask[i] & border_mask)
                 if len(acc_trunc_y) >= 5:
                     # For lenient protocols (Thorax/Breast): measure lateral depth of accessory clip.
@@ -663,6 +666,7 @@ class QAEngine:
             "marker_detected": len(marker_slices) > 0,
             "marker_slices": marker_slices,
             "is_pelvis_or_abdomen_scan": is_pelvis_or_abdomen_scan,
+            "used_totalsegmentator": used_totalsegmentator,
         }
         return metrics
 
@@ -706,7 +710,7 @@ class QAEngine:
         if metrics.get("truncation_error", False):
             slice_info = self._format_slices(metrics.get("truncated_slices", []))
             flags.append(QAFlag(name="GeometryGuardian", status="FAIL_CRITICAL", message=f"TRUNCATION_ERROR: Patient Body Truncation Detected (Anatomy exceeds FOV){slice_info}"))
-        elif metrics.get("accessory_truncation_detected", False):
+        elif metrics.get("accessory_truncation_detected", False) and not metrics.get("used_totalsegmentator", False):
             slice_info = self._format_slices(metrics.get("accessory_truncated_slices", []))
             flags.append(QAFlag(name="GeometryGuardian", status="PASS_WITH_WARNING", message=f"Accessory / Positioning Device Truncated at FOV Edge (Non-Critical Body Anatomy){slice_info}"))
         elif len(metrics.get("tolerated_truncated_slices", [])) > 0:
