@@ -227,6 +227,7 @@ class QAEngine:
                 ts_mask = seg_service.load_body_mask(
                     series_uid=series_uid,
                     task="body",
+                    datasets=datasets,
                     target_shape=hu_volume.shape
                 )
                 if ts_mask is not None and ts_mask.shape == hu_volume.shape and np.any(ts_mask):
