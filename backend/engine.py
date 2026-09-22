@@ -403,13 +403,21 @@ class QAEngine:
         for i in range(hu_volume.shape[0]):
             shrunk_mask[i] = ndimage.binary_erosion(interior_mask[i], iterations=erosion_px)
 
+        # Check DICOM Contrast tag
+        contrast_agent = str(getattr(datasets[0], 'ContrastBolusAgent', '')).strip()
+        has_contrast = bool(contrast_agent)
+
         # --- Agent: FluidPhysicist ---
         # Water/Fluid estimate (Soft tissue median)
         body_mask = hu_volume > -500
         water_hu_est = float(np.median(hu_volume[body_mask])) if np.any(body_mask) else 0.0
 
-        # Specific Fluid (Bladder range)
-        fluid_pixels = hu_volume[(hu_volume >= 0) & (hu_volume <= 50) & body_mask]
+        # Specific Fluid (Bladder range: 0-30 HU to isolate fluid/urine from dense soft tissue)
+        fluid_pixels = hu_volume[(hu_volume >= 0) & (hu_volume <= 30) & body_mask]
+        if fluid_pixels.size == 0:
+            # Fall back to 0-50 HU if no pixels found in 0-30 range
+            fluid_pixels = hu_volume[(hu_volume >= 0) & (hu_volume <= 50) & body_mask]
+
         fluid_median = float(np.median(fluid_pixels)) if fluid_pixels.size > 0 else -1000.0
         fluid_pixels_found = fluid_pixels.size > 0
 
@@ -642,6 +650,7 @@ class QAEngine:
             "center_noise_std": center_noise_std,
             "air_hu_estimate": air_est,
             "water_hu_estimate": water_hu_est,
+            "has_contrast": has_contrast,
             "fluid_median_hu": fluid_median,
             "fluid_pixels_found": fluid_pixels_found,
             "gas_volume_cc": gas_volume_cc,
@@ -741,11 +750,13 @@ class QAEngine:
             flags.append(QAFlag(name="NoiseWhisperer", status="REJECT", message=f"Air HU calibration error ({metrics['air_hu_estimate']:.1f})"))
 
         # --- FluidPhysicist Responsibilities ---
-        # Only evaluate fluid HU calibration when actual fluid-range pixels exist in the scan.
-        if metrics.get("fluid_pixels_found", False):
-            if 0 <= metrics["fluid_median_hu"] <= 35:
-                pass  # Optimal
-            elif 35 < metrics["fluid_median_hu"] <= 45:
+        # Only evaluate fluid HU calibration when actual fluid-range pixels exist in the scan and contrast is not present.
+        if metrics.get("has_contrast", False):
+            flags.append(QAFlag(name="FluidPhysicist", status="SKIPPED", message="IV Contrast detected: Fluid HU calibration skipped"))
+        elif metrics.get("fluid_pixels_found", False):
+            if 0 <= metrics["fluid_median_hu"] <= 40.0:
+                pass  # Normal physiological fluid / urine range
+            elif 40.0 < metrics["fluid_median_hu"] <= 50.0:
                 flags.append(QAFlag(name="FluidPhysicist", status="CONDITIONAL", message=f"Fluid density variance ({metrics['fluid_median_hu']:.1f} HU)"))
             else:
                 flags.append(QAFlag(name="FluidPhysicist", status="REJECT", message=f"HU Consistency failure ({metrics['fluid_median_hu']:.1f} HU)"))
