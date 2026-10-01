@@ -45,7 +45,8 @@ import shutil
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Tuple
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
@@ -281,6 +282,163 @@ class SegmentationService:
     # ------------------------------------------------------------------
     # Main public method
     # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
+    # NIfTI Mask Loader Helper
+    # ------------------------------------------------------------------
+
+    def load_body_mask(
+        self,
+        series_uid: str,
+        task: str = DEFAULT_TASK,
+        datasets: Optional[List[Any]] = None,
+        target_shape: Optional[Tuple[int, int, int]] = None,
+    ) -> Optional[np.ndarray]:
+        """
+        Load existing body segmentation NIfTI mask for a series as a 3D boolean numpy array,
+        reorienting and remapping it to match DICOM voxel coordinates (D, H, W).
+
+        Parameters
+        ----------
+        series_uid:
+            The SeriesInstanceUID.
+        task:
+            Task name (default: 'body').
+        datasets:
+            Optional list of DICOM datasets sorted by Z position for physical coordinate mapping.
+        target_shape:
+            Expected (D, H, W) volume shape for alignment verification.
+
+        Returns
+        -------
+        Optional[np.ndarray]
+            3D boolean numpy array of shape (D, H, W) matching DICOM volume indexing,
+            or None if no segmentation is cached/available.
+        """
+        cached = self._cached_result(series_uid, task)
+        if cached is None or not cached.mask_files:
+            return None
+
+        try:
+            import nibabel as nib
+        except ImportError:
+            logger.warning("nibabel is not installed; cannot load NIfTI segmentation mask.")
+            return None
+
+        # Discover datasets if not provided
+        if datasets is None:
+            input_dir = os.path.join(self.storage_dir, series_uid)
+            if os.path.isdir(input_dir):
+                import glob
+                import pydicom
+                dcm_files = glob.glob(os.path.join(input_dir, "*.dcm"))
+                loaded_ds = []
+                for f in dcm_files:
+                    try:
+                        ds = pydicom.dcmread(f, stop_before_pixels=True)
+                        if getattr(ds, 'SOPClassUID', '') == '1.2.840.10008.5.1.4.1.1.2':
+                            loaded_ds.append(ds)
+                    except Exception:
+                        continue
+                if loaded_ds:
+                    loaded_ds.sort(key=lambda x: float(getattr(x, 'ImagePositionPatient', [0, 0, 0])[2]))
+                    datasets = loaded_ds
+
+        # Prioritise 'body' label, fallback to combining all available mask files
+        mask_files_to_load = []
+        if "body" in cached.mask_files:
+            mask_files_to_load.append(cached.mask_files["body"])
+        else:
+            mask_files_to_load = list(cached.mask_files.values())
+
+        if not mask_files_to_load:
+            return None
+
+        combined_mask: Optional[np.ndarray] = None
+
+        for path in mask_files_to_load:
+            if not os.path.isfile(path):
+                continue
+            try:
+                nii = nib.load(path)
+                nifti_data = nii.get_fdata()
+
+                if nifti_data.ndim != 3:
+                    continue
+
+                if datasets and len(datasets) > 0:
+                    D = len(datasets)
+                    H = int(getattr(datasets[0], 'Rows', 512))
+                    W = int(getattr(datasets[0], 'Columns', 512))
+
+                    Nx, Ny, Nz = nifti_data.shape[:3]
+                    inv_affine = np.linalg.inv(nii.affine)
+
+                    cols = np.arange(W)
+                    rows = np.arange(H)
+                    C, R = np.meshgrid(cols, rows)
+
+                    mask_3d = np.zeros((D, H, W), dtype=bool)
+
+                    for s in range(D):
+                        ds = datasets[s]
+                        pos = getattr(ds, 'ImagePositionPatient', [0.0, 0.0, float(s)])
+                        iop = getattr(ds, 'ImageOrientationPatient', [1.0, 0.0, 0.0, 0.0, 1.0, 0.0])
+                        spacing = getattr(ds, 'PixelSpacing', [1.0, 1.0])
+                        dy, dx = float(spacing[0]), float(spacing[1])
+                        rx, ry, rz = float(iop[0]), float(iop[1]), float(iop[2])
+                        cx, cy, cz = float(iop[3]), float(iop[4]), float(iop[5])
+
+                        X_lps = pos[0] + C * dx * rx + R * dy * cx
+                        Y_lps = pos[1] + C * dx * ry + R * dy * cy
+                        Z_lps = pos[2] + C * dx * rz + R * dy * cz
+
+                        X_ras = -X_lps
+                        Y_ras = -Y_lps
+                        Z_ras = Z_lps
+
+                        I_nii = inv_affine[0,0]*X_ras + inv_affine[0,1]*Y_ras + inv_affine[0,2]*Z_ras + inv_affine[0,3]
+                        J_nii = inv_affine[1,0]*X_ras + inv_affine[1,1]*Y_ras + inv_affine[1,2]*Z_ras + inv_affine[1,3]
+                        K_nii = inv_affine[2,0]*X_ras + inv_affine[2,1]*Y_ras + inv_affine[2,2]*Z_ras + inv_affine[2,3]
+
+                        I_idx = np.round(I_nii).astype(int)
+                        J_idx = np.round(J_nii).astype(int)
+                        K_idx = np.round(K_nii).astype(int)
+
+                        valid = (0 <= I_idx) & (I_idx < Nx) & (0 <= J_idx) & (J_idx < Ny) & (0 <= K_idx) & (K_idx < Nz)
+
+                        slice_m = np.zeros((H, W), dtype=bool)
+                        slice_m[valid] = nifti_data[I_idx[valid], J_idx[valid], K_idx[valid]] > 0
+                        mask_3d[s] = slice_m
+                else:
+                    # Fallback transpose if datasets DICOM info is unavailable
+                    if target_shape is not None:
+                        D, H, W = target_shape
+                        if nifti_data.shape == (W, H, D):
+                            arr = np.transpose(nifti_data, (2, 1, 0))
+                        elif nifti_data.shape == (D, H, W):
+                            arr = nifti_data
+                        else:
+                            arr = np.transpose(nifti_data, (2, 1, 0))
+                    else:
+                        arr = np.transpose(nifti_data, (2, 1, 0))
+                    mask_3d = arr > 0
+
+                if combined_mask is None:
+                    combined_mask = mask_3d
+                else:
+                    combined_mask = combined_mask | mask_3d
+            except Exception as exc:
+                logger.warning("Failed to read NIfTI mask %s: %s", path, exc)
+
+        if combined_mask is not None and target_shape is not None:
+            if combined_mask.shape != target_shape:
+                logger.warning(
+                    "Segmentation mask shape %s does not match target shape %s for series %s",
+                    combined_mask.shape, target_shape, series_uid
+                )
+
+        return combined_mask
 
     def run_body_segmentation(
         self,

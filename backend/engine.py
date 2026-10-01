@@ -9,9 +9,11 @@ from .models import QAResult, QAFlag
 from backend.utils import segment_patient_body_only, segment_patient_and_accessories
 
 class QAEngine:
-    def __init__(self, config_path: str):
+    def __init__(self, config_path: str, storage_dir: Optional[str] = None, segmentation_service: Any = None):
         with open(config_path, 'r', encoding="utf-8") as f:
             self.config = yaml.safe_load(f)
+        self.storage_dir = storage_dir
+        self.segmentation_service = segmentation_service
 
     def _determine_true_patient_roll(self, pixel_array, hu_threshold=-300, angular_resolution=0.1):
         """
@@ -195,11 +197,60 @@ class QAEngine:
         # 1. patient_body_mask (interior_mask): Filled patient mask (excluding table, devices, couch)
         # 2. accessory_table_mask: Couch, wingboard, vac-bag, immobilizers
         pixel_spacing = (float(datasets[0].PixelSpacing[0]), float(datasets[0].PixelSpacing[1]))
-        patient_body_mask, accessory_table_mask = segment_patient_and_accessories(
-            hu_volume,
-            tissue_threshold_hu=-300,
-            pixel_spacing=pixel_spacing
-        )
+        series_uid = datasets[0].SeriesInstanceUID
+
+        patient_body_mask = None
+        accessory_table_mask = None
+        used_totalsegmentator = False
+
+        # Determine SegmentationService to use
+        seg_service = self.segmentation_service
+        if seg_service is None:
+            fn = getattr(datasets[0], 'filename', None)
+            if fn:
+                s_dir = os.path.dirname(fn)
+                st_dir = os.path.dirname(s_dir)
+                if st_dir and os.path.isdir(st_dir):
+                    try:
+                        from backend.segmentation import SegmentationService
+                        seg_service = SegmentationService(storage_dir=st_dir)
+                    except Exception:
+                        seg_service = None
+
+        if seg_service and seg_service.is_available:
+            try:
+                seg_service.run_body_segmentation(
+                    series_uid=series_uid,
+                    task="body",
+                    fast=True,
+                    device="cpu",
+                )
+                ts_mask = seg_service.load_body_mask(
+                    series_uid=series_uid,
+                    task="body",
+                    datasets=datasets,
+                    target_shape=hu_volume.shape
+                )
+                if ts_mask is not None and ts_mask.shape == hu_volume.shape and np.any(ts_mask):
+                    patient_body_mask = ts_mask
+                    raw_objects = hu_volume > -500
+                    accessory_table_mask = raw_objects & ~patient_body_mask
+                    used_totalsegmentator = True
+            except Exception as exc:
+                import logging
+                logging.getLogger(__name__).warning(
+                    "TotalSegmentator failed or unavailable for series %s: %s. "
+                    "Falling back to rule-based body segmentation.",
+                    series_uid, exc
+                )
+
+        if patient_body_mask is None:
+            patient_body_mask, accessory_table_mask = segment_patient_and_accessories(
+                hu_volume,
+                tissue_threshold_hu=-300,
+                pixel_spacing=pixel_spacing
+            )
+
         interior_mask = patient_body_mask
 
         # Track validated empty slices where the mask is completely False
@@ -295,7 +346,8 @@ class QAEngine:
                     tolerated_truncated_slices.append(i + 1)
 
             # Stage B: Standalone Accessory / Table Truncation Check (Non-Critical Warning Condition B)
-            if not patient_truncated_this_slice:
+            # If TotalSegmentator was used, accessories do not count / trigger warnings
+            if not patient_truncated_this_slice and not used_totalsegmentator:
                 acc_trunc_y, acc_trunc_x = np.where(accessory_table_mask[i] & border_mask)
                 if len(acc_trunc_y) >= 5:
                     # For lenient protocols (Thorax/Breast): measure lateral depth of accessory clip.
@@ -351,13 +403,21 @@ class QAEngine:
         for i in range(hu_volume.shape[0]):
             shrunk_mask[i] = ndimage.binary_erosion(interior_mask[i], iterations=erosion_px)
 
+        # Check DICOM Contrast tag
+        contrast_agent = str(getattr(datasets[0], 'ContrastBolusAgent', '')).strip()
+        has_contrast = bool(contrast_agent)
+
         # --- Agent: FluidPhysicist ---
         # Water/Fluid estimate (Soft tissue median)
         body_mask = hu_volume > -500
         water_hu_est = float(np.median(hu_volume[body_mask])) if np.any(body_mask) else 0.0
 
-        # Specific Fluid (Bladder range)
-        fluid_pixels = hu_volume[(hu_volume >= 0) & (hu_volume <= 50) & body_mask]
+        # Specific Fluid (Bladder range: 0-30 HU to isolate fluid/urine from dense soft tissue)
+        fluid_pixels = hu_volume[(hu_volume >= 0) & (hu_volume <= 30) & body_mask]
+        if fluid_pixels.size == 0:
+            # Fall back to 0-50 HU if no pixels found in 0-30 range
+            fluid_pixels = hu_volume[(hu_volume >= 0) & (hu_volume <= 50) & body_mask]
+
         fluid_median = float(np.median(fluid_pixels)) if fluid_pixels.size > 0 else -1000.0
         fluid_pixels_found = fluid_pixels.size > 0
 
@@ -590,6 +650,7 @@ class QAEngine:
             "center_noise_std": center_noise_std,
             "air_hu_estimate": air_est,
             "water_hu_estimate": water_hu_est,
+            "has_contrast": has_contrast,
             "fluid_median_hu": fluid_median,
             "fluid_pixels_found": fluid_pixels_found,
             "gas_volume_cc": gas_volume_cc,
@@ -614,6 +675,7 @@ class QAEngine:
             "marker_detected": len(marker_slices) > 0,
             "marker_slices": marker_slices,
             "is_pelvis_or_abdomen_scan": is_pelvis_or_abdomen_scan,
+            "used_totalsegmentator": used_totalsegmentator,
         }
         return metrics
 
@@ -657,7 +719,7 @@ class QAEngine:
         if metrics.get("truncation_error", False):
             slice_info = self._format_slices(metrics.get("truncated_slices", []))
             flags.append(QAFlag(name="GeometryGuardian", status="FAIL_CRITICAL", message=f"TRUNCATION_ERROR: Patient Body Truncation Detected (Anatomy exceeds FOV){slice_info}"))
-        elif metrics.get("accessory_truncation_detected", False):
+        elif metrics.get("accessory_truncation_detected", False) and not metrics.get("used_totalsegmentator", False):
             slice_info = self._format_slices(metrics.get("accessory_truncated_slices", []))
             flags.append(QAFlag(name="GeometryGuardian", status="PASS_WITH_WARNING", message=f"Accessory / Positioning Device Truncated at FOV Edge (Non-Critical Body Anatomy){slice_info}"))
         elif len(metrics.get("tolerated_truncated_slices", [])) > 0:
@@ -688,11 +750,13 @@ class QAEngine:
             flags.append(QAFlag(name="NoiseWhisperer", status="REJECT", message=f"Air HU calibration error ({metrics['air_hu_estimate']:.1f})"))
 
         # --- FluidPhysicist Responsibilities ---
-        # Only evaluate fluid HU calibration when actual fluid-range pixels exist in the scan.
-        if metrics.get("fluid_pixels_found", False):
-            if 0 <= metrics["fluid_median_hu"] <= 35:
-                pass  # Optimal
-            elif 35 < metrics["fluid_median_hu"] <= 45:
+        # Only evaluate fluid HU calibration when actual fluid-range pixels exist in the scan and contrast is not present.
+        if metrics.get("has_contrast", False):
+            flags.append(QAFlag(name="FluidPhysicist", status="SKIPPED", message="IV Contrast detected: Fluid HU calibration skipped"))
+        elif metrics.get("fluid_pixels_found", False):
+            if 0 <= metrics["fluid_median_hu"] <= 40.0:
+                pass  # Normal physiological fluid / urine range
+            elif 40.0 < metrics["fluid_median_hu"] <= 50.0:
                 flags.append(QAFlag(name="FluidPhysicist", status="CONDITIONAL", message=f"Fluid density variance ({metrics['fluid_median_hu']:.1f} HU)"))
             else:
                 flags.append(QAFlag(name="FluidPhysicist", status="REJECT", message=f"HU Consistency failure ({metrics['fluid_median_hu']:.1f} HU)"))
