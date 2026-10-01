@@ -2,6 +2,8 @@
 
 RapidCTQA uses a modular agent-based architecture to evaluate DICOM series. Each agent lives in `backend/agents/<agent>.py` and has a `compute` step (metrics) and an `evaluate` step (flags). Every limit below is a key in `ctqa.yaml` (shown in brackets); the numbers are the shipped defaults.
 
+**Body mask**: when TotalSegmentator is installed, the engine runs its `body` task on each series and uses that mask for all agents; otherwise (or if it fails) it falls back to the rule-based segmentation that excludes the couch. With the TotalSegmentator mask, accessory/couch truncation is not reported (`metrics.used_totalsegmentator`).
+
 Each flag is `ACCEPT`, `CONDITIONAL`, `REJECT` or `SKIPPED` (informational). The series verdict is `REJECT` if any flag rejects, otherwise `CONDITIONAL` if any flag needs review, otherwise `ACCEPT`. Only `ACCEPT` series are exported to the TPS automatically.
 
 ## 1. GeometryGuardian
@@ -21,8 +23,9 @@ Analyzes the technical quality of the image acquisition.
 
 ## 3. FluidPhysicist
 Validates Hounsfield Unit (HU) accuracy using internal biological markers.
-- **HU Consistency**: Identifies voxels in the range $[0, 50]$ HU within the body mask (the "fluid" range).
-- **Evaluation**: Median fluid density inside [`fluid.optimal_range_hu`: 0–35 HU] passes, up to [`fluid.conditional_max_hu`: 45 HU] is `CONDITIONAL`, anything else is `REJECT` (calibration drift).
+- **HU Consistency**: Median of body voxels in [`fluid.search_range_hu`: 0–30 HU] (isolates fluid/urine from dense soft tissue), falling back to [`fluid.fallback_search_range_hu`: 0–50 HU] when none are found.
+- **Evaluation**: Median inside [`fluid.optimal_range_hu`: 0–40 HU] passes, up to [`fluid.conditional_max_hu`: 50 HU] is `CONDITIONAL`, anything else is `REJECT` (calibration drift).
+- **IV Contrast**: When `ContrastBolusAgent` is set the check is `SKIPPED`.
 - **Metadata**: Ensures the `RescaleSlope` is non-zero.
 
 ## 4. CavityScout

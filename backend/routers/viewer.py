@@ -94,7 +94,15 @@ async def viewer_info(series_uid: str = Depends(valid_series_uid)):
     }
 
 
-def _render_slice_png(dcm_path: str, window_width: float, window_level: float, metal_threshold: float, reference_point: dict = None, show_mask: bool = False) -> bytes:
+def _render_slice_png(
+    dcm_path: str,
+    window_width: float,
+    window_level: float,
+    metal_threshold: float,
+    reference_point: dict = None,
+    show_mask: bool = False,
+    slice_mask: np.ndarray = None,
+) -> bytes:
     """Render a single DICOM slice as a PNG byte stream with W/L and optional overlays."""
     ds = pydicom.dcmread(dcm_path)
     img = ds.pixel_array.astype(np.float32)
@@ -110,9 +118,13 @@ def _render_slice_png(dcm_path: str, window_width: float, window_level: float, m
     rgb = np.stack([img_norm, img_norm, img_norm], axis=-1)
 
     # Patient mask overlay: filled body contour as a light blue tint
+    # (TotalSegmentator mask when available, rule-based otherwise)
     if show_mask:
         try:
-            filled_mask = segment_patient_body_only(img, tissue_threshold_hu=-300)
+            if slice_mask is not None and slice_mask.shape == img.shape and np.any(slice_mask):
+                filled_mask = slice_mask
+            else:
+                filled_mask = segment_patient_body_only(img, tissue_threshold_hu=-300)
             if np.any(filled_mask):
                 rgb[filled_mask] = (rgb[filled_mask].astype(np.float32) * 0.75 + np.array([50, 150, 250], dtype=np.float32) * 0.25).astype(np.uint8)
         except Exception as e:
@@ -168,11 +180,20 @@ async def viewer_slice(
     if series_uid in state.results_cache:
         reference_point = state.results_cache[series_uid].metrics.get("reference_point")
 
+    ts_slice_mask = None
+    if mask:
+        try:
+            ts_3d_mask = state.segmentation_service.load_body_mask(series_uid)
+            if ts_3d_mask is not None and 0 <= index < ts_3d_mask.shape[0]:
+                ts_slice_mask = ts_3d_mask[index]
+        except Exception as e:
+            print(f"Error loading TotalSegmentator slice mask: {e}")
+
     try:
         png_bytes = await asyncio.get_running_loop().run_in_executor(
             state.analysis_pool,
             _render_slice_png,
-            dicom_files[index], ww, wl, metal_threshold, reference_point, mask,
+            dicom_files[index], ww, wl, metal_threshold, reference_point, mask, ts_slice_mask,
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Slice render failed: {e}")

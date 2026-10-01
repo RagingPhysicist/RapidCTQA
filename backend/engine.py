@@ -1,7 +1,9 @@
+import logging
+import os
 import pydicom
 import numpy as np
 from concurrent.futures import ThreadPoolExecutor
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 
 from backend.models import QAResult, QAFlag
 from backend.qa_config import QAConfig, load_qa_config
@@ -14,10 +16,19 @@ from backend.agents.alignment import determine_true_patient_roll
 CT_IMAGE_STORAGE = '1.2.840.10008.5.1.4.1.1.2'
 RT_STRUCTURE_SET_STORAGE = '1.2.840.10008.5.1.4.1.1.481.3'
 
+# Set to 1 to stop the engine from creating its own SegmentationService when
+# none was injected (the test suite does this so it never launches a real
+# TotalSegmentator run). An injected service is always used.
+DISABLE_TOTALSEGMENTATOR_ENV = "RAPIDCTQA_DISABLE_TOTALSEGMENTATOR"
+
+logger = logging.getLogger(__name__)
+
 
 class QAEngine:
-    def __init__(self, config_path: str):
+    def __init__(self, config_path: str, storage_dir: Optional[str] = None, segmentation_service: Any = None):
         self.config: QAConfig = load_qa_config(config_path)
+        self.storage_dir = storage_dir
+        self.segmentation_service = segmentation_service
 
     @property
     def thresholds(self):
@@ -119,12 +130,17 @@ class QAEngine:
         pixel_spacing = (float(datasets[0].PixelSpacing[0]), float(datasets[0].PixelSpacing[1]))
         voxel_vol_cc = (pixel_spacing[0] * pixel_spacing[1] * float(datasets[0].SliceThickness)) / 1000.0
 
-        # Shared masks: filled patient body (no couch / devices) and accessories
-        patient_body_mask, accessory_table_mask = segment_patient_and_accessories(
-            hu_volume,
-            tissue_threshold_hu=-300,
-            pixel_spacing=pixel_spacing
-        )
+        # Shared masks: filled patient body (no couch / devices) and accessories.
+        # TotalSegmentator's body mask is preferred; the rule-based mask is the fallback.
+        masks = self._totalsegmentator_masks(datasets, hu_volume)
+        used_totalsegmentator = masks is not None
+        if masks is None:
+            masks = segment_patient_and_accessories(
+                hu_volume,
+                tissue_threshold_hu=-300,
+                pixel_spacing=pixel_spacing
+            )
+        patient_body_mask, accessory_table_mask = masks
         empty_slices = [i + 1 for i in range(hu_volume.shape[0]) if not np.any(patient_body_mask[i])]
 
         return SeriesContext(
@@ -137,7 +153,43 @@ class QAEngine:
             accessory_table_mask=accessory_table_mask,
             empty_slices=empty_slices,
             thresholds=self.thresholds,
+            used_totalsegmentator=used_totalsegmentator,
         )
+
+    def _segmentation_service_for(self, datasets: List[pydicom.Dataset]):
+        if self.segmentation_service is not None:
+            return self.segmentation_service
+        if os.environ.get(DISABLE_TOTALSEGMENTATOR_ENV) == "1":
+            return None
+        # No service injected: use the storage folder the series was read from
+        fn = getattr(datasets[0], 'filename', None)
+        if fn:
+            storage_dir = os.path.dirname(os.path.dirname(fn))
+            if storage_dir and os.path.isdir(storage_dir):
+                try:
+                    from backend.segmentation import SegmentationService
+                    return SegmentationService(storage_dir=storage_dir)
+                except Exception:
+                    return None
+        return None
+
+    def _totalsegmentator_masks(self, datasets, hu_volume) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+        """(body, accessories) masks from TotalSegmentator, or None to fall back."""
+        seg_service = self._segmentation_service_for(datasets)
+        if not (seg_service and seg_service.is_available):
+            return None
+        series_uid = datasets[0].SeriesInstanceUID
+        try:
+            seg_service.run_body_segmentation(series_uid=series_uid, task="body", fast=True, device="cpu")
+            ts_mask = seg_service.load_body_mask(
+                series_uid=series_uid, task="body", datasets=datasets, target_shape=hu_volume.shape)
+        except Exception as exc:
+            logger.warning("TotalSegmentator failed or unavailable for series %s: %s. "
+                           "Falling back to rule-based body segmentation.", series_uid, exc)
+            return None
+        if ts_mask is None or ts_mask.shape != hu_volume.shape or not np.any(ts_mask):
+            return None
+        return ts_mask, (hu_volume > -500) & ~ts_mask
 
     def _compute_metrics(self, datasets: List[pydicom.Dataset], protocol: str = "Unknown") -> Dict[str, Any]:
         ctx = self._build_context(datasets, protocol)

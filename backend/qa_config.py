@@ -54,8 +54,10 @@ class HUThresholds(_Section):
 
 
 class FluidThresholds(_Section):
-    optimal_range_hu: Tuple[float, float] = (0.0, 35.0)
-    conditional_max_hu: float = 45.0
+    search_range_hu: Tuple[float, float] = (0.0, 30.0)
+    fallback_search_range_hu: Tuple[float, float] = (0.0, 50.0)
+    optimal_range_hu: Tuple[float, float] = (0.0, 40.0)
+    conditional_max_hu: float = 50.0
 
 
 class GasThresholds(_Section):

@@ -13,5 +13,6 @@ uvicorn>=0.29
 customtkinter>=5.2
 matplotlib>=3.8
 scikit-image>=0.22
+nibabel>=5
 # Optional: for AI-based body segmentation (CPU: pip install TotalSegmentator, GPU: pip install TotalSegmentator torch)
 # totalsegmentator

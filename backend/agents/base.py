@@ -19,6 +19,7 @@ class SeriesContext:
     accessory_table_mask: np.ndarray   # couch, wingboard, vac-bag, immobilisers
     empty_slices: List[int]            # 1-indexed slices with no patient voxels
     thresholds: Thresholds
+    used_totalsegmentator: bool = False  # body mask from TotalSegmentator, not the rule-based one
     study_desc: str = field(init=False)
     body_part: str = field(init=False)
 

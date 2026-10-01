@@ -198,3 +198,27 @@ def test_listener_waits_for_open_association(tmp_path):
     time.sleep(0.3)
     callback.assert_called_once_with("1.2.3")
     assert not listener.is_ingesting("1.2.3")
+
+
+# --- FluidPhysicist (merged from PR #45) -----------------------------------------
+
+_FLUID_BASE = {
+    "slice_spacing_var": 0.0, "monotonic_z": True, "gantry_tilt": 0.0, "duplicate_slices": False,
+    "background_air_sd": 5.0, "air_hu_estimate": -1000.0, "rescale_slope": 1.0, "gas_volume_cc": 0.0,
+    "radon_status": "SKIPPED", "pediatric_mismatch": False, "slice_count": 10, "slice_thickness": 2.0,
+    "fluid_pixels_found": True,
+}
+
+
+@pytest.mark.parametrize("median,contrast,expected", [
+    (38.0, False, None),            # inside 0..40
+    (45.0, False, "CONDITIONAL"),   # 40..50
+    (55.0, False, "REJECT"),
+    (55.0, True, "SKIPPED"),        # IV contrast: check skipped
+])
+def test_fluid_limits_and_contrast_skip(median, contrast, expected):
+    from backend.engine import QAEngine
+    engine = QAEngine(settings.QA_CONFIG_PATH)
+    flags = engine._evaluate_rules(dict(_FLUID_BASE, fluid_median_hu=median, has_contrast=contrast))
+    fluid = [f.status for f in flags if f.name == "FluidPhysicist"]
+    assert fluid == ([expected] if expected else [])

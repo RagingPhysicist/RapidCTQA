@@ -330,3 +330,197 @@ class TestNotAvailableError:
         cause = ImportError("no module named totalsegmentator")
         err = SegmentationNotAvailableError(cause=cause)
         assert err.__cause__ is cause
+
+
+# ---------------------------------------------------------------------------
+# Mask Loading & Engine Automatic Segmentation Tests
+# ---------------------------------------------------------------------------
+
+class TestLoadBodyMask:
+
+    def test_load_body_mask_with_nifti(self, series_dir):
+        import numpy as np
+        import nibabel as nib
+        uid, sdir, storage = series_dir
+        service = SegmentationService(storage_dir=storage)
+
+        cache_dir = service.output_dir_for(uid, "body")
+        os.makedirs(cache_dir, exist_ok=True)
+
+        # Create dummy 3D NIfTI volume (W=10, H=10, D=5)
+        data = np.zeros((10, 10, 5), dtype=np.uint8)
+        data[2:8, 2:8, :] = 1
+        img = nib.Nifti1Image(data, np.eye(4))
+        nib.save(img, os.path.join(cache_dir, "body.nii.gz"))
+
+        loaded = service.load_body_mask(uid, task="body", target_shape=(5, 10, 10))
+        assert loaded is not None
+        assert loaded.shape == (5, 10, 10)
+        assert loaded[0, 5, 5] == True
+
+    def test_load_body_mask_returns_none_when_missing(self, service):
+        loaded = service.load_body_mask("nonexistent_uid")
+        assert loaded is None
+
+
+class TestEngineAutomaticSegmentation:
+
+    def _create_mock_dataset(self, series_uid="1.2.840.10008.1.2.3"):
+        import numpy as np
+        import pydicom
+        from pydicom.dataset import Dataset, FileMetaDataset
+
+        datasets = []
+        for i in range(5):
+            ds = Dataset()
+            ds.file_meta = FileMetaDataset()
+            ds.file_meta.TransferSyntaxUID = pydicom.uid.ExplicitVRLittleEndian
+            ds.file_meta.MediaStorageSOPClassUID = '1.2.840.10008.5.1.4.1.1.2'
+            ds.file_meta.MediaStorageSOPInstanceUID = f"{series_uid}.{i+1}"
+            ds.SOPClassUID = '1.2.840.10008.5.1.4.1.1.2'
+            ds.SOPInstanceUID = f"{series_uid}.{i+1}"
+            ds.SeriesInstanceUID = series_uid
+            ds.PatientName = "Test^Patient"
+            ds.ProtocolName = "CHEST"
+            ds.Rows = 16
+            ds.Columns = 16
+            ds.PixelSpacing = [1.0, 1.0]
+            ds.SliceThickness = 2.5
+            ds.RescaleSlope = 1.0
+            ds.RescaleIntercept = -1024.0
+            ds.ImagePositionPatient = [0.0, 0.0, float(i * 2.5)]
+            ds.BitsAllocated = 16
+            ds.BitsStored = 16
+            ds.HighBit = 15
+            ds.SamplesPerPixel = 1
+            ds.PhotometricInterpretation = "MONOCHROME2"
+            ds.PixelRepresentation = 0
+
+            # Create pixel array with a central human-like mass
+            arr = np.full((16, 16), 24, dtype=np.uint16)  # background ~ -1000 HU
+            arr[4:12, 4:12] = 1024  # body ~ 0 HU
+            ds.PixelData = arr.tobytes()
+            datasets.append(ds)
+
+        return datasets
+
+    def _patch_adapter_success(self, service, mask_data, cache_dir):
+        import nibabel as nib
+        import numpy as np
+        mock_adapter = MagicMock()
+        def fake_run(input_dicom_dir, output_dir, **kw):
+            os.makedirs(output_dir, exist_ok=True)
+            p = os.path.join(output_dir, "body.nii.gz")
+            A = np.array([
+                [-1.0, 0.0, 0.0, 0.0],
+                [0.0, -1.0, 0.0, 0.0],
+                [0.0, 0.0, 2.5, 0.0],
+                [0.0, 0.0, 0.0, 1.0]
+            ])
+            img = nib.Nifti1Image(mask_data, A)
+            nib.save(img, p)
+            return {"body": p}
+        mock_adapter.run.side_effect = fake_run
+        service._adapter = mock_adapter
+        return mock_adapter
+
+    def test_engine_uses_totalsegmentator_mask_when_available(self, tmp_storage):
+        import numpy as np
+        import pydicom
+        from backend.engine import QAEngine
+
+        service = SegmentationService(storage_dir=tmp_storage)
+        uid = "1.2.840.10008.999.1"
+        datasets = self._create_mock_dataset(series_uid=uid)
+
+        sdir = os.path.join(tmp_storage, uid)
+        os.makedirs(sdir, exist_ok=True)
+        for idx, ds in enumerate(datasets):
+            pydicom.dcmwrite(os.path.join(sdir, f"slice_{idx:03d}.dcm"), ds, write_like_original=False)
+
+        mask_data = np.zeros((16, 16, 5), dtype=np.uint8)
+        mask_data[4:12, 4:12, :] = 1
+        cache_dir = service.output_dir_for(uid, "body")
+        self._patch_adapter_success(service, mask_data, cache_dir)
+
+        engine = QAEngine(
+            config_path=os.path.join(os.path.dirname(os.path.dirname(__file__)), "ctqa.yaml"),
+            segmentation_service=service,
+        )
+
+        metrics = engine._compute_metrics(datasets, protocol="CHEST")
+        assert metrics is not None
+        assert metrics.get("used_totalsegmentator") is True
+
+    def test_engine_falls_back_when_totalsegmentator_fails(self, tmp_storage):
+        import pydicom
+        from backend.engine import QAEngine
+
+        service = SegmentationService(storage_dir=tmp_storage)
+        mock_adapter = MagicMock()
+        mock_adapter.run.side_effect = SegmentationError("TotalSegmentator crashed")
+        service._adapter = mock_adapter
+
+        uid = "1.2.840.10008.999.2"
+        datasets = self._create_mock_dataset(series_uid=uid)
+
+        sdir = os.path.join(tmp_storage, uid)
+        os.makedirs(sdir, exist_ok=True)
+        for idx, ds in enumerate(datasets):
+            pydicom.dcmwrite(os.path.join(sdir, f"slice_{idx:03d}.dcm"), ds, write_like_original=False)
+
+        engine = QAEngine(
+            config_path=os.path.join(os.path.dirname(os.path.dirname(__file__)), "ctqa.yaml"),
+            segmentation_service=service,
+        )
+
+        metrics = engine._compute_metrics(datasets, protocol="CHEST")
+        assert metrics is not None
+        # Verify analysis succeeded via fallback
+        assert "slice_count" in metrics
+        assert metrics["slice_count"] == 5
+        assert metrics.get("used_totalsegmentator") is False
+
+    def test_engine_totalsegmentator_untruncated_body_ignores_accessories(self, tmp_storage):
+        import numpy as np
+        import pydicom
+        from backend.engine import QAEngine
+
+        service = SegmentationService(storage_dir=tmp_storage)
+        uid = "1.2.840.10008.999.3"
+        datasets = self._create_mock_dataset(series_uid=uid)
+
+        # Add accessory tissue (couch/table) touching image border (rows 0..2)
+        for ds in datasets:
+            arr = np.frombuffer(ds.PixelData, dtype=np.uint16).reshape((16, 16)).copy()
+            arr[:3, :] = 1024  # high density at border
+            ds.PixelData = arr.tobytes()
+
+        mask_data = np.zeros((16, 16, 5), dtype=np.uint8)
+        mask_data[4:12, 4:12, :] = 1
+        cache_dir = service.output_dir_for(uid, "body")
+        self._patch_adapter_success(service, mask_data, cache_dir)
+
+        engine = QAEngine(
+            config_path=os.path.join(os.path.dirname(os.path.dirname(__file__)), "ctqa.yaml"),
+            segmentation_service=service,
+        )
+
+        sdir = os.path.join(tmp_storage, uid)
+        os.makedirs(sdir, exist_ok=True)
+        dcm_paths = []
+        for idx, ds in enumerate(datasets):
+            p = os.path.join(sdir, f"slice_{idx:03d}.dcm")
+            pydicom.dcmwrite(p, ds, write_like_original=False)
+            dcm_paths.append(p)
+
+        res = engine.analyze_series(dcm_paths)
+        assert res.metrics["used_totalsegmentator"] is True
+        assert res.metrics["truncation_error"] is False
+        assert res.metrics["accessory_truncation_detected"] is False
+
+        # Verify no GeometryGuardian truncation warning flag was raised
+        geom_flags = [f for f in res.flags if f.name == "GeometryGuardian"]
+        for f in geom_flags:
+            assert "TRUNCATION" not in f.message
+            assert "Truncated" not in f.message

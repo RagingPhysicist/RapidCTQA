@@ -47,9 +47,11 @@ thresholds:
   hu:
     air_range: [-1100, -900]              # 1st-percentile air estimate outside -> REJECT
 
-  fluid:                                  # FluidPhysicist (median of 0..50 HU voxels in the body)
-    optimal_range_hu: [0, 35]
-    conditional_max_hu: 45                # above optimal up to this -> CONDITIONAL, beyond -> REJECT
+  fluid:                                  # FluidPhysicist (skipped when ContrastBolusAgent is set)
+    search_range_hu: [0, 30]              # body voxels whose median is the fluid estimate ...
+    fallback_search_range_hu: [0, 50]     # ... or this range if none fall in search_range_hu
+    optimal_range_hu: [0, 40]
+    conditional_max_hu: 50                # above optimal up to this -> CONDITIONAL, beyond -> REJECT
 
   gas:                                    # CavityScout (pelvis/abdomen scans, inferior half of the series)
     conditional_cc: 15                    # CONDITIONAL above

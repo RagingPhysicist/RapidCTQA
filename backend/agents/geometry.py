@@ -98,8 +98,10 @@ def compute(ctx: SeriesContext) -> Dict[str, Any]:
             elif lateral_violation_count > 0:
                 tolerated_truncated_slices.append(i + 1)
 
-        # Stage B: Standalone accessory / table truncation (non-critical)
-        if not patient_truncated_this_slice:
+        # Stage B: Standalone accessory / table truncation (non-critical).
+        # Skipped with a TotalSegmentator mask: its "accessories" are everything
+        # outside the body, so clipping there is not reported.
+        if not patient_truncated_this_slice and not ctx.used_totalsegmentator:
             acc_trunc_y, acc_trunc_x = np.where(accessory_table_mask[i] & border_mask)
             if len(acc_trunc_y) >= cfg.min_edge_pixels:
                 # Lenient protocols: shallow accessory clipping is a tolerated
@@ -139,6 +141,7 @@ def compute(ctx: SeriesContext) -> Dict[str, Any]:
         "accessory_truncation_detected": accessory_truncation_detected,
         "accessory_truncated_slices": accessory_truncated_slices,
         "empty_slices": ctx.empty_slices,
+        "used_totalsegmentator": ctx.used_totalsegmentator,
     }
 
 
@@ -149,7 +152,7 @@ def evaluate(metrics: Dict[str, Any], t: Thresholds) -> List[QAFlag]:
     if metrics.get("truncation_error", False):
         slice_info = format_slices(metrics.get("truncated_slices", []))
         flags.append(QAFlag(name=NAME, status=QAStatus.REJECT, message=f"TRUNCATION_ERROR: Patient Body Truncation Detected (Anatomy exceeds FOV){slice_info}"))
-    elif metrics.get("accessory_truncation_detected", False):
+    elif metrics.get("accessory_truncation_detected", False) and not metrics.get("used_totalsegmentator", False):
         slice_info = format_slices(metrics.get("accessory_truncated_slices", []))
         flags.append(QAFlag(name=NAME, status=QAStatus.CONDITIONAL, message=f"Accessory / Positioning Device Truncated at FOV Edge (Non-Critical Body Anatomy){slice_info}"))
     elif len(metrics.get("tolerated_truncated_slices", [])) > 0:

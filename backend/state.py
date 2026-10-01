@@ -26,7 +26,6 @@ from backend.security import is_valid_uid, series_dir
 from backend.segmentation import SegmentationService
 from backend.status import QAStatus
 
-engine = QAEngine(settings.QA_CONFIG_PATH)
 
 results_cache: Dict[str, QAResult] = {}
 ct_files_cache: Dict[str, List[str]] = {}
@@ -41,6 +40,12 @@ fourdct_cache_lock = threading.Lock()
 analysis_pool = ThreadPoolExecutor(max_workers=4)
 
 segmentation_service = SegmentationService(storage_dir=settings.STORAGE_DIR)
+
+engine = QAEngine(
+    settings.QA_CONFIG_PATH,
+    storage_dir=settings.STORAGE_DIR,
+    segmentation_service=segmentation_service,
+)
 
 
 def storage_path(series_uid: str) -> str:
