@@ -43,3 +43,10 @@ CT/
 # DICOM / Patient Data (Safety)
 *.dcm
 *.DCM
+
+# Site configuration and operational data (may contain patient identifiers)
+webApp.local.yaml
+logs/
+rejections.log
+errors.xlsx
+*.xlsx

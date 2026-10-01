@@ -1,0 +1,11 @@
+[project]
+name = "rapidctqa"
+version = "1.6.0"
+description = "Pre-contour QA for radiotherapy planning CT series"
+requires-python = ">=3.10"
+
+[tool.pytest.ini_options]
+# Repository root on sys.path so `import backend...` works without PYTHONPATH
+pythonpath = ["."]
+testpaths = ["backend"]
+asyncio_mode = "auto"

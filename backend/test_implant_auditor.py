@@ -11,10 +11,11 @@ class QAFlag:
         return f"QAFlag(name='{self.name}', status='{self.status}', message='{self.message}')"
 
 from backend.engine import QAEngine
+from backend.settings import QA_CONFIG_PATH as CTQA_YAML
 
 def test_implant_auditor_rules_refined():
     # Setup mock engine with dummy config
-    engine = QAEngine("ctqa.yaml")
+    engine = QAEngine(CTQA_YAML)
 
     # Test Case 1: Internal, Surface and External Metal
     metrics = {

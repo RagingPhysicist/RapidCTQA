@@ -25,20 +25,26 @@ RapidCTQA is a specialized automated Quality Assurance (QA) tool for radiotherap
 
 1.  **Install Dependencies**:
     ```bash
-    pip install -r requirements.txt
+    pip install -r requirements.txt        # add -dev for the test tools
     ```
-2.  **Run the Application**:
+2.  **Configure your site** (optional): copy `webApp.local.example.yaml` to `webApp.local.yaml` (git-ignored) and set the storage share, which workstations may open the dashboard, and which DICOM senders are allowed. See [Configuration](docs/CONFIGURATION.md).
+3.  **Run the Application**:
     ```bash
     python run.py
     ```
-    - **Web Dashboard**: `http://localhost:8080`
+    - **Web Dashboard**: `http://localhost:8080` (served to this machine only until `webApp.local.yaml` opens it up)
     - **DICOM Listener**: `0.0.0.0:11112` (AET: Configurable in `webApp.yaml`, defaults to `RT_QA_SCP`)
+
+## QA Verdicts
+Every check produces a flag of `ACCEPT`, `CONDITIONAL` (clinician review) or `REJECT`; purely informational flags are `SKIPPED`. A series is `REJECT` if any flag rejects, otherwise `CONDITIONAL` if any flag needs review, otherwise `ACCEPT`. Only `ACCEPT` series are exported to the TPS automatically.
+
+All limits quoted below are defaults from `ctqa.yaml`, which is the single source of truth for thresholds. The file is validated at startup, so an unknown key is an error rather than a silently ignored setting.
 
 ## QA Agents & Logic
 
 ### 1. GeometryGuardian (Geometry & Truncation)
 Ensures geometric integrity and FOV coverage.
-- **Truncation**: Detects if anatomy touches the FOV edge (3px buffer, > -200 HU).
+- **Truncation**: Detects if the patient body touches the FOV edge (3 px border). Anterior/posterior contact rejects; lateral clipping is tolerated up to 15 mm (Thorax/Breast), 5 mm (Head & Neck) or 0 mm (others).
 - **Consistency**: Validates monotonic slice positions and consistent slice spacing.
 - **Tilt**: Flags gantry tilt exceeding 1.0°.
 
@@ -55,10 +61,10 @@ Validates CT number consistency using biological markers.
 ### 4. CavityScout (Air & Gas Auditor)
 Detects gas pockets that may impact dose calculation.
 - **Logic**: Isolates voxels < -500 HU within the body mask.
-- **Thresholds**: Flags moderate (>15cc) or excessive (>50cc) gas.
+- **Thresholds**: Flags moderate (>15 cc, conditional), excessive (>50 cc, reject) or non-physiological (>100 cc, reject) gas in pelvis/abdomen scans.
 
 ### 5. ImplantAuditor (Metal Detection)
-Detects and classifies metallic objects (>2000 HU).
+Detects and classifies metallic objects (>3000 HU, flagged above 0.2 cc per class).
 - **Classification**: Distinguishes between internal implants, surface markers, and external objects.
 - **Validation**: Uses morphological erosion to define an internal body buffer.
 
@@ -73,6 +79,15 @@ Checks for patient rotation relative to the couch.
 Lead oversight for general clinical standards.
 - **Pediatric Check**: Compares parsed `PatientAge` (VR: AS) against protocol/study markers (e.g., "(Child)").
 - **Resolution**: Flags series with slice thickness > 3mm (Warning) or > 5mm (Reject).
+
+## Security
+RapidCTQA handles patient data and can delete series and push them to the TPS, so the defaults are conservative:
+- The dashboard/API only answers clients in `security.allowed_clients` (loopback by default) and refuses cross-site `POST`s.
+- Series UIDs are validated before they are used as paths, both in the API and in the DICOM listener; the listener can be limited to known AE titles and sender IPs.
+- Startup cleanup only removes UID-named series folders older than `storage.retention_days`.
+- `logs/`, `webApp.local.yaml` and spreadsheets are git-ignored, as the daily logs contain patient names and IDs.
+
+There are no user accounts. Put the dashboard behind an authenticating reverse proxy if you need to know who approved or rejected a series.
 
 ## Documentation
 For detailed information, please refer to the `docs/` directory:

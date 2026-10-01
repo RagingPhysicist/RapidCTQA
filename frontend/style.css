@@ -8,12 +8,11 @@
   --success: #10b981;
   --warning: #f59e0b;
   --error: #ef4444;
-  --fail_critical: var(--error);
-  --pass_with_warning: var(--warning);
+  /* Status colours (see backend/status.py) */
   --reject: var(--error);
   --conditional: var(--warning);
   --accept: var(--success);
-  --pass: var(--success);
+  --skipped: #64748b;
   --glass: rgba(255, 255, 255, 0.05);
   --border: rgba(255, 255, 255, 0.1);
 }
@@ -143,9 +142,10 @@ td {
   font-weight: 600;
 }
 
-.badge-accept, .badge-pass { background: rgba(16, 185, 129, 0.2); color: var(--success); }
-.badge-conditional, .badge-pass_with_warning { background: rgba(245, 158, 11, 0.2); color: var(--warning); }
-.badge-reject, .badge-fail_critical { background: rgba(239, 68, 68, 0.2); color: var(--error); }
+.badge-accept { background: rgba(16, 185, 129, 0.2); color: var(--success); }
+.badge-conditional { background: rgba(245, 158, 11, 0.2); color: var(--warning); }
+.badge-reject { background: rgba(239, 68, 68, 0.2); color: var(--error); }
+.badge-skipped { background: rgba(100, 116, 139, 0.2); color: var(--skipped); }
 .badge-pending { background: var(--glass); color: var(--text-muted); }
 .badge-ingesting { background: rgba(0, 210, 255, 0.2); color: var(--primary); }
 

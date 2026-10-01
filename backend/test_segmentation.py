@@ -50,7 +50,7 @@ def tmp_storage(tmp_path):
 @pytest.fixture
 def series_dir(tmp_storage):
     """Create a dummy series directory with a placeholder .dcm file."""
-    uid = "1.2.3.test_series"
+    uid = "1.2.3.4567"
     sdir = os.path.join(tmp_storage, uid)
     os.makedirs(sdir)
     (Path(sdir) / "slice_001.dcm").write_bytes(b"\x00" * 128)
@@ -233,8 +233,8 @@ class TestServiceRunBodySegmentation:
         service = SegmentationService(storage_dir=tmp_storage)
         self._patch_adapter(service)
 
-        with pytest.raises(FileNotFoundError, match="nonexistent"):
-            service.run_body_segmentation(series_uid="nonexistent")
+        with pytest.raises(FileNotFoundError, match="1.2.3.999"):
+            service.run_body_segmentation(series_uid="1.2.3.999")
 
     def test_temp_dir_cleaned_on_failure(self, series_dir):
         uid, sdir, storage = series_dir

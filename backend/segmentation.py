@@ -48,6 +48,8 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 import numpy as np
 
+from backend.security import is_valid_uid, safe_child_path, series_dir
+
 logger = logging.getLogger(__name__)
 
 
@@ -253,7 +255,7 @@ class SegmentationService:
     # ------------------------------------------------------------------
 
     def output_dir_for(self, series_uid: str, task: str) -> str:
-        return os.path.join(self.storage_dir, series_uid, "segmentations", task)
+        return safe_child_path(os.path.join(series_dir(self.storage_dir, series_uid), "segmentations"), task)
 
     def _cached_result(self, series_uid: str, task: str) -> Optional[SegmentationResult]:
         """Return a SegmentationResult from a previous run, or None."""
@@ -315,6 +317,8 @@ class SegmentationService:
             3D boolean numpy array of shape (D, H, W) matching DICOM volume indexing,
             or None if no segmentation is cached/available.
         """
+        if not is_valid_uid(series_uid):
+            return None
         cached = self._cached_result(series_uid, task)
         if cached is None or not cached.mask_files:
             return None
@@ -327,7 +331,7 @@ class SegmentationService:
 
         # Discover datasets if not provided
         if datasets is None:
-            input_dir = os.path.join(self.storage_dir, series_uid)
+            input_dir = series_dir(self.storage_dir, series_uid)
             if os.path.isdir(input_dir):
                 import glob
                 import pydicom
@@ -483,7 +487,7 @@ class SegmentationService:
         FileNotFoundError
             series_uid directory does not exist.
         """
-        input_dir = os.path.join(self.storage_dir, series_uid)
+        input_dir = series_dir(self.storage_dir, series_uid)
         if not os.path.isdir(input_dir):
             raise FileNotFoundError(
                 f"Series directory not found: {input_dir}"
@@ -501,7 +505,7 @@ class SegmentationService:
         # Use a temp dir alongside the final output dir; swap on success
         tmp_dir = tempfile.mkdtemp(
             prefix="totalseg_tmp_",
-            dir=os.path.join(self.storage_dir, series_uid),
+            dir=input_dir,
         )
 
         try:

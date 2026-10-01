@@ -2,8 +2,15 @@
 
 ## Project Structure
 - `backend/`: Core Python application logic.
-  - `main.py`: FastAPI application and API routes.
-  - `engine.py`: The QA Engine containing all agent logic.
+  - `main.py`: FastAPI app: middleware, routers, startup.
+  - `routers/`: API endpoints (`studies.py`, `viewer.py`, `reports.py`).
+  - `state.py`: Shared runtime state (QA engine, caches, listener) and the analysis pipeline.
+  - `settings.py`: Loads `webApp.yaml` + `webApp.local.yaml` + environment overrides.
+  - `security.py`: UID / path validation, client allow-list and CSRF guard.
+  - `engine.py`: QA engine orchestration (reads series, builds masks, runs agents).
+  - `agents/`: One module per QA agent (`compute` metrics, `evaluate` flags).
+  - `qa_config.py`: Typed, validated loader for `ctqa.yaml`.
+  - `status.py`: The single status vocabulary (`ACCEPT` / `CONDITIONAL` / `REJECT` ...).
   - `listener.py`: DICOM SCP listener implementation.
   - `reporter.py`: PDF report generation logic.
   - `models.py`: Pydantic models for API data structures.
@@ -18,19 +25,13 @@
 ### 1. Environment
 It is recommended to use a virtual environment:
 ```bash
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-pip install -r requirements.txt
+python -m venv .venv
+source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+pip install -r requirements-dev.txt   # runtime + test dependencies
 ```
 
-### 2. Environment Variables
-To ensure internal module resolution, add the repository root to your `PYTHONPATH`:
-```bash
-# On Linux/macOS
-export PYTHONPATH=$PYTHONPATH:.
-# On Windows (PowerShell)
-$env:PYTHONPATH += ";."
-```
+### 2. Site configuration
+Copy `webApp.local.example.yaml` to `webApp.local.yaml` and set your storage share and network ranges (see [CONFIGURATION.md](CONFIGURATION.md)). Without it the app stores data in `data/rtct` and only serves `127.0.0.1`.
 
 ## Running the Application
 To start the backend and DICOM listener:
@@ -42,15 +43,18 @@ python run.py
 The project uses `pytest` for testing.
 
 ### Running Backend Tests
-Ensure your `PYTHONPATH` is set correctly, then run:
+From the repository root (or `backend/`):
 ```bash
-pytest backend/
+pytest
 ```
+`pyproject.toml` puts the repository root on the import path, so no `PYTHONPATH` setup is needed. The root `conftest.py` points storage, logs, exports and reports at a temporary directory, so the suite never touches a real DICOM share or the clinical logs, whatever `webApp.local.yaml` says.
 
 ### Key Test Files
 - `backend/test_implant_auditor.py`: Tests for metal detection logic.
 - `backend/test_dicom_sender.py`: Tests for DICOM networking/egress.
 - `backend/test_refined_pca.py`: Tests for advanced geometry/alignment logic.
+- `backend/test_hardening.py`: Config validation, status normalisation, UID/path checks, listener and cleanup behaviour.
+- `backend/test_rejection.py`: Reject endpoint, CSRF and client allow-list.
 
 ## Concurrency & Resource Optimization
 The application enforces strict limits on concurrency to prevent host CPU and RAM exhaustion:
@@ -60,7 +64,7 @@ The application enforces strict limits on concurrency to prevent host CPU and RA
 
 ## QA Results Cache & Disk Persistence
 To prevent duplicate analysis on application restarts:
-- Completed `QAResult` objects are written to disk as `qa_result.json` directly within the series storage directory (`STORAGE_DIR/{series_uid}/qa_result.json`).
+- Completed `QAResult` objects are written to disk as `qa_result.json` directly within the series storage directory (`STORAGE_DIR/{series_uid}/qa_result.json`). Legacy status values in older files are normalised on load.
 - Upon starting up, the API loads all existing `qa_result.json` files from `STORAGE_DIR` into `results_cache` in memory.
 - Scans that have already been evaluated skip re-analysis and are not re-sent to DICOM destinations.
 
@@ -68,3 +72,4 @@ To prevent duplicate analysis on application restarts:
 - **Always update documentation**: If you change agent logic or API endpoints, update the corresponding files in `docs/`.
 - **Verify with Cockpit**: Use `cockpit.py` to visually verify any changes to image processing logic.
 - **Maintain `import yaml` placement**: In `backend/main.py`, ensure `import yaml` remains at the top level to avoid scope issues during configuration loading.
+- **No import-time side effects**: Directory creation, cleanup and the DICOM listener start in the FastAPI lifespan (`backend/main.py`), never at import, so tests and tools can import the app safely.

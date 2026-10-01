@@ -1,17 +1,29 @@
 from fpdf import FPDF
 import datetime
 import os
-from .models import QAResult
+from backend.models import QAResult
+from backend.status import QAStatus, try_normalize_status
+
+STATUS_COLOURS = {
+    QAStatus.ACCEPT: (16, 185, 129),
+    QAStatus.CONDITIONAL: (245, 158, 11),
+    QAStatus.SKIPPED: (100, 116, 139),
+}
+REJECT_COLOUR = (239, 68, 68)
+
+
+def _status_colour(status):
+    return STATUS_COLOURS.get(try_normalize_status(status), REJECT_COLOUR)
 
 class QAPDFReport(FPDF):
     def header(self):
         # Logo placeholder or Title
         self.set_font('helvetica', 'B', 20)
         self.set_text_color(0, 210, 255) # RapidCTQA Blue
-        self.cell(0, 10, 'RapidCTQA Clinical Report', ln=True, align='L')
+        self.cell(0, 10, 'RapidCTQA Clinical Report', new_x="LMARGIN", new_y="NEXT", align='L')
         self.set_font('helvetica', 'I', 10)
         self.set_text_color(128, 128, 128)
-        self.cell(0, 10, f'Generated on: {datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}', ln=True, align='L')
+        self.cell(0, 10, f'Generated on: {datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}', new_x="LMARGIN", new_y="NEXT", align='L')
         self.ln(10)
 
     def footer(self):
@@ -88,10 +100,7 @@ def generate_pdf_report(result: QAResult, output_path: str):
             # Value cell (regular, colored for final status)
             pdf.set_font('helvetica', '', 11)
             if label == 'Final Status:':
-                if value in ('ACCEPT', 'PASS'): pdf.set_text_color(16, 185, 129)
-                elif value in ('CONDITIONAL', 'PASS_WITH_WARNING'): pdf.set_text_color(245, 158, 11)
-                elif value == 'SKIPPED': pdf.set_text_color(100, 116, 139)
-                else: pdf.set_text_color(239, 68, 68)
+                pdf.set_text_color(*_status_colour(value))
             row.cell(str(value))
             pdf.set_text_color(0, 0, 0) # Reset
 
@@ -119,10 +128,7 @@ def generate_pdf_report(result: QAResult, output_path: str):
             row.cell(flag.name)
             
             # Status Color
-            if flag.status in ('ACCEPT', 'PASS'): pdf.set_text_color(16, 185, 129)
-            elif flag.status in ('CONDITIONAL', 'PASS_WITH_WARNING'): pdf.set_text_color(245, 158, 11)
-            elif flag.status == 'SKIPPED': pdf.set_text_color(100, 116, 139)
-            else: pdf.set_text_color(239, 68, 68)
+            pdf.set_text_color(*_status_colour(flag.status))
             row.cell(flag.status)
             
             # Reset Color for message

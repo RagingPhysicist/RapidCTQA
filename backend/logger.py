@@ -6,9 +6,11 @@ import threading
 from datetime import datetime
 from typing import List, Dict, Any, Optional
 
+from backend.status import try_normalize_status, QAStatus
+
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-LOGS_DIR = os.path.join(ROOT_DIR, "logs")
-os.makedirs(LOGS_DIR, exist_ok=True)
+# Daily logs contain patient names and IDs; logs/ is git-ignored.
+LOGS_DIR = os.environ.get("RAPIDCTQA_LOGS_DIR") or os.path.join(ROOT_DIR, "logs")
 
 _log_lock = threading.Lock()
 
@@ -38,7 +40,7 @@ def log_qa_result(
         except Exception:
             date_str = datetime.now().strftime("%Y-%m-%d")
 
-    # Extract issues (messages or flag names from non-ACCEPT flags)
+    # Issues: every flag that is not ACCEPT
     flags_list = []
     issues = []
     flags = getattr(result, "flags", [])
@@ -46,15 +48,16 @@ def log_qa_result(
         f_name = getattr(f, "name", str(f.get("name") if isinstance(f, dict) else ""))
         f_status = getattr(f, "status", str(f.get("status") if isinstance(f, dict) else ""))
         f_msg = getattr(f, "message", str(f.get("message") if isinstance(f, dict) else ""))
+        f_status = str(try_normalize_status(f_status) or f_status)
         flags_list.append({"name": f_name, "status": f_status, "message": f_msg})
-        if f_status and f_status.upper() != "ACCEPT":
+        if f_status and f_status != QAStatus.ACCEPT:
             issue_text = f"{f_name}: {f_msg}" if f_msg else f_name
             issues.append(issue_text)
 
     series_uid = getattr(result, "series_uid", "")
     patient_name = getattr(result, "patient_name", "Unknown")
     protocol = getattr(result, "protocol", "Unknown")
-    status = getattr(result, "status", "UNKNOWN")
+    status = str(try_normalize_status(getattr(result, "status", "")) or getattr(result, "status", "UNKNOWN"))
     metrics = getattr(result, "metrics", {})
 
     record = {
@@ -73,6 +76,7 @@ def log_qa_result(
     log_file = get_daily_log_path(date_str)
 
     with _log_lock:
+        os.makedirs(LOGS_DIR, exist_ok=True)
         records = []
         if os.path.exists(log_file):
             try:
@@ -125,7 +129,7 @@ def query_logs(
     """
     Query logs with filters.
     - date_str: filter by date YYYY-MM-DD
-    - status: filter by status (ACCEPT, CONDITIONAL, REJECT)
+    - status: filter by status (ACCEPT, CONDITIONAL, REJECT; legacy names accepted)
     - issue_type: filter by agent name or substring in flags/issues
     - search: general search on patient name, patient id, or series uid
     """
@@ -138,18 +142,9 @@ def query_logs(
                 continue
 
         if status and status.strip() and status.strip().upper() != "ALL":
-            req_status = status.strip().upper()
-            r_status = r.get("status", "").upper()
-            matched = False
-            if req_status in ("REJECT", "FAIL_CRITICAL") and r_status in ("REJECT", "FAIL_CRITICAL"):
-                matched = True
-            elif req_status in ("CONDITIONAL", "PASS_WITH_WARNING") and r_status in ("CONDITIONAL", "PASS_WITH_WARNING"):
-                matched = True
-            elif req_status in ("ACCEPT", "PASS") and r_status in ("ACCEPT", "PASS"):
-                matched = True
-            elif req_status == r_status:
-                matched = True
-            if not matched:
+            req_status = try_normalize_status(status) or status.strip().upper()
+            r_status = try_normalize_status(r.get("status", "")) or r.get("status", "").upper()
+            if req_status != r_status:
                 continue
 
         if issue_type and issue_type.strip() and issue_type.strip().upper() != "ALL":

@@ -22,10 +22,10 @@ agents:
       2. Stage 2 (Morphological Opening): Apply directional (vertical/lateral 5 mm) opening matrix to sever narrow tissue bridges connecting skin to vac-bags, wingboards, or headrests; isolate largest 3D connected component corresponding to human anatomy.
       3. Stage 3 (Dual Masking): Generate distinct, mutually exclusive masks: 'patient_body_mask' (patient tissue only) and 'accessory_table_mask' (couch, wingboard, vac-bag, immobilizers).
       4. Dual-Stage Truncation Classifier:
-         - Condition A (Critical Failure): patient_body_mask intersects outermost border ring (<= 3 px) in A/P core sector OR exceeds protocol lateral thresholds -> FAIL_CRITICAL ("Patient Body Truncation Detected").
-         - Condition B (Non-Critical Warning): accessory_table_mask intersects outermost border ring while patient_body_mask is intact -> PASS_WITH_WARNING ("Accessory / Positioning Device Truncated at FOV Edge").
+         - Condition A (Critical Failure): patient_body_mask intersects outermost border ring (<= 3 px) in A/P core sector OR exceeds protocol lateral thresholds -> REJECT ("Patient Body Truncation Detected").
+         - Condition B (Non-Critical Warning): accessory_table_mask intersects outermost border ring while patient_body_mask is intact -> CONDITIONAL ("Accessory / Positioning Device Truncated at FOV Edge").
          - Over-range air slices -> SKIPPED (EMPTY_SLICE).
-         - Flared wingboard elbow clipping in Thorax/Breast (< 15 mm) -> PASS_WITH_WARNING.
+         - Flared wingboard elbow clipping in Thorax/Breast (< 15 mm) -> CONDITIONAL.
 
   - name: "FluidPhysicist"
     role: "HU Accuracy Specialist"
@@ -108,7 +108,7 @@ orchestrator:
   error_handling:
     water_hu_33_fix: "If FluidPhysicist returns < 35 and non-contrast, downgrade 'Critical Failure' to 'Clinical Variance'."
     noise_fix: "Prioritize NoiseWhisperer.air_sd over internal image variance."
-    table_vacbag_clipping_fix: "Downgrade table / vac-bag clipped at FOV edge to PASS_WITH_WARNING without critical stop."
-    wingboard_elbow_fix: "Suppress flared wingboard elbow clipping in Thorax/Breast if depth < 15 mm to PASS_WITH_WARNING."
+    table_vacbag_clipping_fix: "Downgrade table / vac-bag clipped at FOV edge to CONDITIONAL without critical stop."
+    wingboard_elbow_fix: "Suppress flared wingboard elbow clipping in Thorax/Breast if depth < 15 mm to CONDITIONAL."
     empty_slice_fix: "Skip empty air slices above head / below feet as EMPTY_SLICE."
     pelvic_rectal_gas_fix: "Classify Pelvic Rectal Gas Volume < 15 cc as PASS (normal physiological variance)."
