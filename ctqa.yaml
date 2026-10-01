@@ -1,285 +1,72 @@
+# RapidCTQA clinical thresholds
+#
+# Every value in this file is read by the QA engine (backend/qa_config.py
+# validates it at startup). Unknown or misspelled keys stop the application
+# from starting, so an edit here either takes effect or fails loudly.
+#
+# The checks themselves (which metric is compared against which limit, and
+# whether a breach is CONDITIONAL or REJECT) are implemented per agent in
+# backend/agents/*.py and documented in docs/AGENTS_DETAIL.md.
+#
+# Series verdict: REJECT if any flag rejects, otherwise CONDITIONAL if any
+# flag needs review, otherwise ACCEPT. Only ACCEPT series are auto-exported.
+
 sop:
   id: RT-CT-PRECONTOUR-QA
-  version: 1.3
+  version: 1.4
   description: >
-    Pre-contouring QA for radiotherapy CT datasets. Updated with
-    Biological-relative tolerances for clinical patient datasets.
-
-dicom:
-
-  tags:
-
-    SeriesInstanceUID:
-      tag: "0020,000E"
-      type: string
-
-    SOPInstanceUID:
-      tag: "0008,0018"
-      type: string
-
-    Modality:
-      tag: "0008,0060"
-      expected: "CT"
-
-    ImagePositionPatient:
-      tag: "0020,0032"
-      type: float[3]
-
-    ImageOrientationPatient:
-      tag: "0020,0037"
-      type: float[6]
-
-    PixelSpacing:
-      tag: "0028,0030"
-      type: float[2]
-
-    SliceThickness:
-      tag: "0018,0050"
-      type: float
-
-    SpacingBetweenSlices:
-      tag: "0018,0088"
-      optional: true
-
-    GantryDetectorTilt:
-      tag: "0018,1120"
-      default: 0.0
-
-    Rows:
-      tag: "0028,0010"
-
-    Columns:
-      tag: "0028,0011"
-
-    RescaleSlope:
-      tag: "0028,1053"
-
-    RescaleIntercept:
-      tag: "0028,1052"
-
-    PatientPosition:
-      tag: "0018,5100"
-
-    KVP:
-      tag: "0018,0060"
-      optional: true
-
-    ConvolutionKernel:
-      tag: "0018,1210"
-      optional: true
-
-    ContrastBolusAgent:
-      tag: "0018,0010"
-      optional: true
-
-derived_metrics:
-
-  slice_z_positions:
-    source: ImagePositionPatient
-    method: "extract z component and sort"
-
-  slice_spacing_array:
-    method: "diff(slice_z_positions)"
-
-  slice_spacing_variation_mm:
-    method: "max(slice_spacing_array) - min(slice_spacing_array)"
-
-  monotonic_z:
-    method: "all(diff > 0) OR all(diff < 0)"
-
-  duplicate_slices:
-    method: "len(unique(slice_z_positions)) != total_slices"
-
-  voxel_volume_cc:
-    method: "(PixelSpacing[0] * PixelSpacing[1] * SliceThickness) / 1000"
-
-  hu_conversion:
-    method: "HU = pixel * RescaleSlope + RescaleIntercept"
-
-  air_hu_estimate:
-    method: "percentile(volume, 1)"
-
-  water_hu_estimate:
-    method: "median(volume)"
-
-  noise_std_hu:
-    method: "std(center ROI)"
-
-  gas_mask:
-    method: "volume < -500 HU"
-
-  gas_volume_cc:
-    method: "sum(gas_mask) * voxel_volume_cc"
-
-  body_edge_contact:
-    method: "any(body voxels touch image border)"
-
-  pediatric_mismatch:
-    method: "PatientAge < 18 and 'Child' not in StudyDescription"
+    Pre-contouring QA for radiotherapy CT datasets.
 
 thresholds:
 
-  geometry:
-    max_slice_spacing_variation_mm: 1.0
-    max_gantry_tilt_deg: 1.0
-    accessory_ring_width_px: 3
-    accessory_threshold_hu: -300
+  geometry:                               # GeometryGuardian
+    edge_buffer_px: 3                     # FOV border ring checked for body/accessory contact
+    min_edge_pixels: 5                    # fewer border pixels than this is ignored as noise
+    lateral_tolerance_mm:                 # tolerated lateral (left/right) body clipping depth
+      lenient: 15.0                       #   protocols matching lenient_protocol_keywords
+      head_neck: 5.0                      #   protocols/studies matching head_neck_keywords
+      default: 0.0                        #   everything else (pelvis, prostate, ...)
+    accessory_lateral_tolerance_mm: 15.0  # lenient protocols: deeper accessory clipping -> REJECT
+    lenient_protocol_keywords: [THORAX, CHEST, BREAST]
+    head_neck_keywords: [head, neck, brain, c-spine, cspine, cervical]
+    max_slice_spacing_variation_mm: 1.0   # REJECT above
+    max_gantry_tilt_deg: 1.0              # CONDITIONAL above
 
-  slice_thickness:
-    preferred_max_mm: 3.0
-    absolute_max_mm: 5.0
+  slice_thickness:                        # Integrity
+    preferred_max_mm: 3.0                 # CONDITIONAL above
+    absolute_max_mm: 5.0                  # REJECT above
+
+  integrity:
+    min_slice_count: 5                    # REJECT below
+    adult_age_years: 18                   # PatientAge >= this counts as adult for the (Child)/(Adult) check
+
+  noise:                                  # NoiseWhisperer
+    corner_roi_px: 20                     # square background-air ROI in each image corner
+    max_background_air_sd_hu: 15.0        # CONDITIONAL above (mean SD of the four corner ROIs)
 
   hu:
-    air_range: [-1100, -900]
-    water_range: [-35, 35]
+    air_range: [-1100, -900]              # 1st-percentile air estimate outside -> REJECT
 
-  noise:
-    preferred_max_hu: 35
-    absolute_max_hu: 50
+  fluid:                                  # FluidPhysicist (median of 0..50 HU voxels in the body)
+    optimal_range_hu: [0, 35]
+    conditional_max_hu: 45                # above optimal up to this -> CONDITIONAL, beyond -> REJECT
 
-  gas:
-    general:
-      conditional_cc: 100
-      reject_cc: 300
+  gas:                                    # CavityScout (pelvis/abdomen scans, inferior half of the series)
+    conditional_cc: 15                    # CONDITIONAL above
+    reject_cc: 50                         # REJECT above
+    leak_cc: 100                          # REJECT as SEGMENTATION_LEAK above
+    couch_exclusion_mm: 15                # ignore gas this close to the posterior skin/couch interface
+    pelvis_keywords: [PELVIS, PROSTATE, ABD, ABDOMEN, RECTUM, GYN, PELVIC]
 
-  implants:
-    metal_threshold_hu: 3000
-    max_volume_cc: 0.2
+  implants:                               # ImplantAuditor
+    metal_threshold_hu: 3000              # voxels above this are metal (also used for the viewer overlay)
+    max_volume_cc: 0.2                    # CONDITIONAL when internal, surface or external metal exceeds this
+    internal_margin_mm: 10                # body erosion margin separating internal from surface metal
+    marker_max_volume_cc: 0.1             # per-component volume below which a 3-point pattern counts as set-up markers
 
-  alignment:
-    max_allowable_tilt_deg: 1.5
+  alignment:                              # AlignmentAuditor
+    max_allowable_tilt_deg: 1.5           # CONDITIONAL (ROLL_ALERT) above ...
+    min_confidence: 0.95                  # ... when the symmetry confidence is above this
+    symmetry_gate: 0.90                   # below this the slice is unreadable and the check is SKIPPED
     hu_floor: -300
     angular_step_deg: 0.1
-
-
-    prostate:
-      rectal_diameter_cm:
-        accept: 4.0
-        conditional: 5.0
-      gas_volume_cc:
-        accept: 50
-        conditional: 100
-
-rules:
-
-  dicom_integrity:
-
-    - name: single_series
-      check: "unique(SeriesInstanceUID) == 1"
-      reject_if_false: true
-
-    - name: modality_check
-      check: "Modality == 'CT'"
-      reject_if_false: true
-
-    - name: duplicate_slices
-      check: "duplicate_slices == false"
-      reject_if_false: true
-
-    - name: pediatric_protocol_check
-      check: "pediatric_mismatch == false"
-      reject_if_false: true
-
-  geometry:
-
-    - name: monotonic_z
-      check: "monotonic_z == true"
-      reject_if_false: true
-
-    - name: slice_spacing
-      check: "slice_spacing_variation_mm <= 1.0"
-      reject_if_false: true
-
-    - name: gantry_tilt
-      check: "abs(GantryDetectorTilt) <= 1.0"
-      conditional_if_false: true
-
-  slice_resolution:
-
-    - name: preferred_thickness
-      check: "SliceThickness <= 3.0"
-      accept_if_true: true
-      conditional_if_false: true
-
-    - name: absolute_thickness
-      check: "SliceThickness <= 5.0"
-      reject_if_false: true
-
-  hu_integrity:
-
-    - name: air_hu
-      check: "air_hu_estimate in [-1100, -900]"
-      reject_if_false: true
-
-    - name: water_hu
-      check: "water_hu_estimate in [-35, 35]"
-      reject_if_false: true
-
-    - name: rescale_valid
-      check: "RescaleSlope != 0"
-      reject_if_false: true
-
-  image_quality:
-
-    - name: noise_preferred
-      check: "noise_std_hu <= 35"
-      accept_if_true: true
-      conditional_if_false: true
-
-    - name: noise_absolute
-      check: "noise_std_hu <= 50"
-      reject_if_false: true
-
-  field_of_view:
-
-    - name: body_not_truncated
-      check: "body_edge_contact == true"
-      reject_if_false: true
-
-  bowel_gas:
-
-    - name: excessive_gas
-      check: "gas_volume_cc <= 300"
-      reject_if_false: true
-
-    - name: moderate_gas
-      check: "gas_volume_cc <= 100"
-      conditional_if_false: true
-
-  implants:
-
-    - name: metal_implants
-      check: "metal_volume_cc <= 0.05"
-      conditional_if_false: true
-
-decision:
-
-  accept:
-    - no_reject_flags
-    - no_conditional_flags
-
-  conditional:
-    - no_reject_flags
-    - any_conditional_flags
-
-  reject:
-    - any_reject_flag
-
-outputs:
-
-  status: [ACCEPT, CONDITIONAL, REJECT]
-
-  report_fields:
-    - geometry
-    - hu
-    - noise
-    - gas_volume_cc
-    - flags
-
-audit:
-
-  required:
-    - reviewer_id
-    - date
-    - site
-    - decision

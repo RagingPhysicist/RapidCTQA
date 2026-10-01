@@ -1,11 +1,12 @@
 import numpy as np
 import pydicom
 from backend.engine import QAEngine
+from backend.settings import QA_CONFIG_PATH as CTQA_YAML
 from unittest.mock import MagicMock
 
 def test_marker_exclusion():
     # Setup mock engine
-    engine = QAEngine("ctqa.yaml")
+    engine = QAEngine(CTQA_YAML)
 
     # Create 10 slices
     datasets = []

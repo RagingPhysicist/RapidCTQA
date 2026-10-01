@@ -5,6 +5,14 @@ The RapidCTQA backend is built with FastAPI and provides endpoints for monitorin
 ## Base URL
 The default base URL for the API is `http://localhost:8080/api`.
 
+## Access control
+- Only clients in `security.allowed_clients` (`webApp.yaml` / `webApp.local.yaml`) are served; others get `403`.
+- Every `POST` must send the header `X-RapidCTQA-Request: 1`. Cross-site requests (an `Origin` other than the server or `security.allowed_origins`) are refused with `403`.
+- `series_uid` path parameters must be DICOM UIDs (digits and dots, max 64 characters); anything else is `400`.
+
+## Status values
+`ACCEPT`, `CONDITIONAL`, `REJECT` for flags and series verdicts, `SKIPPED` for informational flags, `PENDING` / `INGESTING` for series not analysed yet. See `backend/status.py`.
+
 ## Endpoints
 
 ### 1. Ingestion Status
@@ -69,13 +77,10 @@ Manually triggers the QA analysis for a specific series.
 
 ---
 
-### 5. Launch Cockpit
-**POST** `/api/launch_cockpit/{series_uid}`
+### 5. Approve / Reject
+**POST** `/api/viewer/{series_uid}/approve`: copies the series to `TPS_EXPORT` and routes it to the active destinations in `dest.json`. Refused with `409` while the series is still being received.
 
-Launches the `cockpit.py` visualization tool on the server host for the specified series.
-
-**Path Parameters:**
-- `series_uid` (string): The DICOM Series Instance UID.
+**POST** `/api/viewer/{series_uid}/reject`: deletes the series, its export and its PDF report, and appends to `rejections.log`.
 
 ---
 
@@ -90,7 +95,7 @@ Generates and downloads a PDF QA report for the specified series.
 **Response:** `application/pdf` file stream.
 
 ## Authentication
-Currently, the API does not require authentication (designed for internal clinical network use).
+There is no per-user authentication. Access is limited by client IP and the request guards above. For user accounts, put the dashboard behind an authenticating reverse proxy.
 
 ## Static Frontend
 The root path `/` and `/static/*` serve the web dashboard.

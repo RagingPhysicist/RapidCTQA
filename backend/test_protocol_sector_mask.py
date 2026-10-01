@@ -362,10 +362,10 @@ thresholds:
         # Verify critical truncation error is FALSE
         self.assertFalse(result.metrics["truncation_error"])
 
-        # Verify flagged warning status is PASS_WITH_WARNING
+        # Verify flagged warning status is CONDITIONAL
         gg_flags = [f for f in result.flags if f.name == "GeometryGuardian"]
         self.assertEqual(len(gg_flags), 1)
-        self.assertEqual(gg_flags[0].status, "PASS_WITH_WARNING")
+        self.assertEqual(gg_flags[0].status, "CONDITIONAL")
         self.assertIn("Accessory", gg_flags[0].message)
         self.assertIn("Slice 3", gg_flags[0].message)
 

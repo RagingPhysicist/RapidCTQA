@@ -1,5 +1,39 @@
 const API_BASE = '/api';
 
+// The API refuses state-changing requests without this header, which a
+// third-party web page cannot add to a cross-site request.
+const CSRF_HEADERS = { 'X-RapidCTQA-Request': '1' };
+
+function apiPost(url, body) {
+  const opts = { method: 'POST', headers: { ...CSRF_HEADERS } };
+  if (body !== undefined) {
+    opts.headers['Content-Type'] = 'application/json';
+    opts.body = JSON.stringify(body);
+  }
+  return fetch(url, opts);
+}
+
+// Values from DICOM headers and logs are untrusted: escape before innerHTML.
+function esc(value) {
+  return String(value ?? '').replace(/[&<>"']/g, c => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+// A value passed as a string argument to an inline onclick handler.
+function jsArg(value) {
+  return esc(JSON.stringify(String(value ?? '')));
+}
+
+// Status values: ACCEPT, CONDITIONAL, REJECT, SKIPPED, PENDING, INGESTING.
+function statusKey(status) {
+  return String(status || 'pending').toLowerCase().replace(/[^a-z]/g, '');
+}
+
+function statusBadge(status, style = '') {
+  const label = esc(status || 'PENDING');
+  return `<span class="badge badge-${statusKey(status)}"${style ? ` style="${style}"` : ''}>${label}</span>`;
+}
+
 async function fetchStatus() {
   try {
     const response = await fetch(`${API_BASE}/status`);
@@ -53,16 +87,16 @@ async function fetchStudies() {
 function _renderSeriesRow(tbody, study) {
   const tr = document.createElement('tr');
   tr.innerHTML = `
-    <td style="font-weight: 600;">${study.patient_name}</td>
-    <td style="color: var(--text-muted); font-size: 0.875rem;">${study.protocol || '—'}</td>
-    <td style="font-family: monospace; font-size: 0.75rem;">${(study.series_uid || '').substring(0, 16)}...</td>
-    <td>${study.instance_count}</td>
-    <td><span class="badge badge-${(study.status || 'pending').toLowerCase()}">${study.status}</span></td>
+    <td style="font-weight: 600;">${esc(study.patient_name)}</td>
+    <td style="color: var(--text-muted); font-size: 0.875rem;">${esc(study.protocol || '—')}</td>
+    <td style="font-family: monospace; font-size: 0.75rem;">${esc((study.series_uid || '').substring(0, 16))}...</td>
+    <td>${esc(study.instance_count)}</td>
+    <td>${statusBadge(study.status)}</td>
     <td>
       <div class="actions-cell">
-        <button class="view-btn" onclick="viewStudy('${study.series_uid}')">View Report</button>
-        <button class="view-btn" style="background: var(--secondary);" onclick="launchCockpit('${study.series_uid}')">View Scan</button>
-        <button class="btn-segment" onclick="runSegmentation('${study.series_uid}', null)" title="Run TotalSegmentator body segmentation">🫁 Segment</button>
+        <button class="view-btn" onclick="viewStudy(${jsArg(study.series_uid)})">View Report</button>
+        <button class="view-btn" style="background: var(--secondary);" onclick="launchCockpit(${jsArg(study.series_uid)})">View Scan</button>
+        <button class="btn-segment" onclick="runSegmentation(${jsArg(study.series_uid)}, null)" title="Run TotalSegmentator body segmentation">🫁 Segment</button>
       </div>
     </td>
   `;
@@ -71,7 +105,6 @@ function _renderSeriesRow(tbody, study) {
 
 function _render4DCTGroup(tbody, group) {
   const isExpanded = expandedGroups.has(group.group_id);
-  const escapedGroupId = encodeURIComponent(group.group_id);
 
   // ── Header row ───────────────────────────────────────────────────
   const headerTr = document.createElement('tr');
@@ -80,24 +113,24 @@ function _render4DCTGroup(tbody, group) {
   headerTr.innerHTML = `
     <td style="font-weight: 700;">
       <span style="color: var(--primary); margin-right: 0.4rem;">⊕</span>
-      ${group.patient_name}
+      ${esc(group.patient_name)}
     </td>
     <td style="color: var(--text-muted); font-size: 0.875rem;">
       <span style="font-weight:600; color: var(--primary);">4DCT</span>
-      ${group.series_description ? '· ' + group.series_description : ''}
+      ${group.series_description ? '· ' + esc(group.series_description) : ''}
     </td>
-    <td style="font-family: monospace; font-size: 0.75rem;">${group.phase_count} phases</td>
-    <td>${group.instance_count}</td>
-    <td><span class="badge badge-${(group.status || 'pending').toLowerCase()}">${group.status}</span></td>
+    <td style="font-family: monospace; font-size: 0.75rem;">${esc(group.phase_count)} phases</td>
+    <td>${esc(group.instance_count)}</td>
+    <td>${statusBadge(group.status)}</td>
     <td>
       <div class="actions-cell">
         <button class="view-btn" style="background: var(--secondary);"
-          onclick="toggle4DCTGroup(this, '${group.group_id}')">
-          ${isExpanded ? '▲ Collapse' : `▼ ${group.phase_count} Phases`}
+          onclick="toggle4DCTGroup(this, ${jsArg(group.group_id)})">
+          ${isExpanded ? '▲ Collapse' : `▼ ${esc(group.phase_count)} Phases`}
         </button>
         <button class="btn-segment"
-          onclick="runSegmentation('${group.reference_phase_uid}', '${escapedGroupId}')"
-          title="Run TotalSegmentator on reference phase (${group.reference_phase_uid.substring(0, 12)}…)">
+          onclick="runSegmentation(${jsArg(group.reference_phase_uid)}, ${jsArg(group.group_id)})"
+          title="Run TotalSegmentator on reference phase (${esc((group.reference_phase_uid || '').substring(0, 12))}…)">
           🫁 Segment 4D Ref
         </button>
       </div>
@@ -115,15 +148,15 @@ function _render4DCTGroup(tbody, group) {
     phaseTr.innerHTML = `
       <td style="padding-left: 2.5rem; color: var(--text-muted); font-size: 0.85rem;">
         ${isRef ? '<span title="Reference phase for segmentation" style="color:var(--primary);">★ </span>' : ''}
-        ${phase.phase_label}
+        ${esc(phase.phase_label)}
       </td>
-      <td style="font-size: 0.8rem; color: var(--text-muted);">Temporal pos. ${phase.temporal_position}</td>
-      <td style="font-family: monospace; font-size: 0.7rem;">${(phase.series_uid || '').substring(0, 16)}…</td>
-      <td>${phase.instance_count}</td>
-      <td><span class="badge badge-${(phase.status || 'pending').toLowerCase()}">${phase.status}</span></td>
+      <td style="font-size: 0.8rem; color: var(--text-muted);">Temporal pos. ${esc(phase.temporal_position)}</td>
+      <td style="font-family: monospace; font-size: 0.7rem;">${esc((phase.series_uid || '').substring(0, 16))}…</td>
+      <td>${esc(phase.instance_count)}</td>
+      <td>${statusBadge(phase.status)}</td>
       <td>
         <button class="view-btn" style="background: var(--secondary); font-size: 0.8rem;"
-          onclick="launchCockpit('${phase.series_uid}')">View Scan</button>
+          onclick="launchCockpit(${jsArg(phase.series_uid)})">View Scan</button>
       </td>
     `;
     tbody.appendChild(phaseTr);
@@ -146,25 +179,21 @@ function toggle4DCTGroup(btn, groupId) {
   btn.textContent = isNowExpanded ? '▲ Collapse' : '▼ Phases';
 }
 
-async function runSegmentation(seriesUid, encodedGroupId) {
+async function runSegmentation(seriesUid, groupId) {
   if (!seriesUid) { alert('No series selected for segmentation.'); return; }
 
-  const msg = encodedGroupId
+  const msg = groupId
     ? `Run TotalSegmentator body segmentation on the 4DCT reference phase?\n\n(Phase UID: ${seriesUid.substring(0, 20)}…)`
     : `Run TotalSegmentator body segmentation on this series?`;
 
   if (!confirm(msg)) return;
 
-  const url = encodedGroupId
-    ? `${API_BASE}/studies/group/${decodeURIComponent(encodedGroupId)}/segment`
-    : `${API_BASE}/viewer/${seriesUid}/segment`;
+  const url = groupId
+    ? `${API_BASE}/studies/group/${encodeURIComponent(groupId)}/segment`
+    : `${API_BASE}/viewer/${encodeURIComponent(seriesUid)}/segment`;
 
   try {
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ task: 'body', device: 'cpu', fast: true, force: false }),
-    });
+    const res = await apiPost(url, { task: 'body', device: 'cpu', fast: true, force: false });
     const data = await res.json();
     if (res.ok) {
       alert(data.message || 'Segmentation started in background.');
@@ -184,7 +213,7 @@ async function _updateCockpitSegmentationStatus(seriesUid) {
   if (!statusEl || !btn) return;
 
   try {
-    const res = await fetch(`${API_BASE}/viewer/${seriesUid}/segmentation`);
+    const res = await fetch(`${API_BASE}/viewer/${encodeURIComponent(seriesUid)}/segmentation`);
     if (res.ok) {
       const data = await res.json();
       if (data.available) {
@@ -212,11 +241,8 @@ async function runCockpitSegmentation() {
   if (statusEl) statusEl.textContent = 'Starting segmentation in background...';
 
   try {
-    const res = await fetch(`${API_BASE}/viewer/${seriesUid}/segment`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ task: 'body', device: 'cpu', fast: true, force: false }),
-    });
+    const res = await apiPost(`${API_BASE}/viewer/${encodeURIComponent(seriesUid)}/segment`,
+      { task: 'body', device: 'cpu', fast: true, force: false });
     const data = await res.json();
     if (res.ok) {
       if (statusEl) statusEl.innerHTML = '<span class="badge badge-ingesting">● Processing segmentation...</span>';
@@ -233,7 +259,7 @@ async function runCockpitSegmentation() {
 
 async function viewStudy(seriesUid) {
   try {
-    const response = await fetch(`${API_BASE}/studies/${seriesUid}`);
+    const response = await fetch(`${API_BASE}/studies/${encodeURIComponent(seriesUid)}`);
     const result = await response.json();
     
     const modal = document.getElementById('modal');
@@ -244,22 +270,20 @@ async function viewStudy(seriesUid) {
     
     let flagsHtml = result.flags.map(flag => `
       <div class="flag-item">
-        <div class="flag-icon" style="background: var(--${flag.status.toLowerCase()})"></div>
+        <div class="flag-icon" style="background: var(--${statusKey(flag.status)})"></div>
         <div>
-          <div style="font-weight: 600;">${flag.name}</div>
-          <div style="font-size: 0.875rem; color: var(--text-muted);">${flag.message || ''}</div>
+          <div style="font-weight: 600;">${esc(flag.name)}</div>
+          <div style="font-size: 0.875rem; color: var(--text-muted);">${esc(flag.message)}</div>
         </div>
       </div>
     `).join('');
 
     body.innerHTML = `
       <div style="margin-bottom: 2rem; display: flex; justify-content: space-between; align-items: center;">
-        <span class="badge badge-${result.status.toLowerCase()}" style="font-size: 1.25rem; padding: 0.5rem 1.5rem;">
-          ${result.status}
-        </span>
+        ${statusBadge(result.status, 'font-size: 1.25rem; padding: 0.5rem 1.5rem;')}
         <div style="text-align: right; color: var(--text-muted); font-size: 0.875rem;">
-          <div>Protocol: ${result.protocol}</div>
-          <div>UID: ${seriesUid}</div>
+          <div>Protocol: ${esc(result.protocol)}</div>
+          <div>UID: ${esc(seriesUid)}</div>
         </div>
       </div>
       
@@ -270,8 +294,8 @@ async function viewStudy(seriesUid) {
           <p><strong>Bkg Air Noise:</strong> ${result.metrics.background_air_sd.toFixed(2)} HU</p>
           <p><strong>Fluid Density:</strong> ${result.metrics.fluid_median_hu.toFixed(1)} HU</p>
           <p><strong>Gas Volume:</strong> ${result.metrics.gas_volume_cc.toFixed(1)} cc</p>
-          <p><strong>Patient Tilt:</strong> ${result.metrics.max_tilt_deg ? result.metrics.max_tilt_deg.toFixed(1) : '0.0'}°</p>
-          <p><strong>Slices:</strong> ${result.metrics.slice_count}</p>
+          <p><strong>Patient Roll:</strong> ${result.metrics.radon_roll_deg != null ? result.metrics.radon_roll_deg.toFixed(1) : '0.0'}°</p>
+          <p><strong>Slices:</strong> ${esc(result.metrics.slice_count)}</p>
         </div>
         <div>
           <h3 style="margin-bottom: 1rem;">Agent Findings</h3>
@@ -279,8 +303,8 @@ async function viewStudy(seriesUid) {
         </div>
       </div>
       <div style="margin-top: 2rem; padding-top: 1rem; border-top: 1px solid var(--border); display: flex; gap: 1rem;">
-        <a href="${API_BASE}/reports/${seriesUid}/pdf" target="_blank" class="view-btn" style="background: var(--success); text-decoration: none;">Download PDF</a>
-        <button class="view-btn" style="background: var(--secondary);" onclick="rerunQA('${seriesUid}')">Re-run Analysis</button>
+        <a href="${API_BASE}/reports/${encodeURIComponent(seriesUid)}/pdf" target="_blank" class="view-btn" style="background: var(--success); text-decoration: none;">Download PDF</a>
+        <button class="view-btn" style="background: var(--secondary);" onclick="rerunQA(${jsArg(seriesUid)})">Re-run Analysis</button>
       </div>
     `;
 
@@ -293,7 +317,7 @@ async function viewStudy(seriesUid) {
 
 async function rerunQA(seriesUid) {
   try {
-    const response = await fetch(`${API_BASE}/validate/${seriesUid}`, { method: 'POST' });
+    const response = await apiPost(`${API_BASE}/validate/${encodeURIComponent(seriesUid)}`);
     const data = await response.json();
     alert(data.message);
     closeModal();
@@ -328,7 +352,7 @@ async function launchCockpit(seriesUid) {
   _setCockpitButtonsEnabled(false);
 
   try {
-    const res = await fetch(`${API_BASE}/viewer/${seriesUid}/info`);
+    const res = await fetch(`${API_BASE}/viewer/${encodeURIComponent(seriesUid)}/info`);
     if (!res.ok) throw new Error(await res.text());
     const info = await res.json();
 
@@ -347,7 +371,7 @@ async function launchCockpit(seriesUid) {
       const refPtCoords = document.getElementById('cockpit-ref-pt-coords');
       if (info.reference_point) {
         const rp = info.reference_point;
-        refPtCoords.innerHTML = `${rp.name || 'Point'}<br>X: ${rp.x.toFixed(1)}, Y: ${rp.y.toFixed(1)}, Z: ${rp.z.toFixed(1)}`;
+        refPtCoords.innerHTML = `${esc(rp.name || 'Point')}<br>X: ${rp.x.toFixed(1)}, Y: ${rp.y.toFixed(1)}, Z: ${rp.z.toFixed(1)}`;
 
         if (info.ref_point_slice_idx !== null && info.ref_point_slice_idx !== undefined) {
           refPtArea.classList.add('clickable');
@@ -384,7 +408,7 @@ async function launchCockpit(seriesUid) {
     // Render QA flags
     const flagsEl = document.getElementById('cockpit-flags');
     if (info.flags && info.flags.length > 0) {
-      const colours = { REJECT: '#ef4444', FAIL_CRITICAL: '#ef4444', CONDITIONAL: '#f59e0b', PASS_WITH_WARNING: '#f59e0b', ACCEPT: '#10b981', PASS: '#10b981', SKIPPED: '#64748b' };
+      const colours = { REJECT: '#ef4444', CONDITIONAL: '#f59e0b', ACCEPT: '#10b981', SKIPPED: '#64748b' };
       flagsEl.innerHTML = info.flags.map(f => {
         // Detect slice indicators like "(Slice 5)" or "(Slices 10-15)"
         const match = f.message ? f.message.match(/\(Slices?\s+(\d+)/) : null;
@@ -395,8 +419,8 @@ async function launchCockpit(seriesUid) {
           <div class="cockpit-flag ${clickable}" ${onclick}>
             <div class="cockpit-flag-dot" style="background:${colours[f.status] || '#94a3b8'}"></div>
             <div>
-              <div class="cockpit-flag-name">${f.name}</div>
-              <div class="cockpit-flag-msg">${f.message || ''}</div>
+              <div class="cockpit-flag-name">${esc(f.name)}</div>
+              <div class="cockpit-flag-msg">${esc(f.message)}</div>
             </div>
           </div>
         `;
@@ -448,7 +472,7 @@ function refreshCockpitSlice() {
   // Sync nav slider
   document.getElementById('cockpit-nav-slider').value = sliceIndex;
 
-  const url = `${API_BASE}/viewer/${seriesUid}/slice/${sliceIndex}?ww=${ww}&wl=${wl}&metal=${metal}&mask=${mask}`;
+  const url = `${API_BASE}/viewer/${encodeURIComponent(seriesUid)}/slice/${sliceIndex}?ww=${ww}&wl=${wl}&metal=${metal}&mask=${mask}`;
   const loading = document.getElementById('cockpit-loading');
   loading.classList.add('visible');
 
@@ -503,7 +527,7 @@ async function cockpitApprove() {
   if (!seriesUid) return;
   _setCockpitButtonsEnabled(false);
   try {
-    const res = await fetch(`${API_BASE}/viewer/${seriesUid}/approve`, { method: 'POST' });
+    const res = await apiPost(`${API_BASE}/viewer/${encodeURIComponent(seriesUid)}/approve`);
     const data = await res.json();
     if (res.ok) {
       closeCockpit();
@@ -528,7 +552,7 @@ async function cockpitReject() {
 
   _setCockpitButtonsEnabled(false);
   try {
-    const res = await fetch(`${API_BASE}/viewer/${seriesUid}/reject`, { method: 'POST' });
+    const res = await apiPost(`${API_BASE}/viewer/${encodeURIComponent(seriesUid)}/reject`);
     const data = await res.json();
     if (res.ok) {
       closeCockpit();
@@ -643,19 +667,19 @@ async function fetchLogs() {
 
       let issuesHtml = '';
       if (log.issues && log.issues.length > 0) {
-        issuesHtml = log.issues.map(iss => `<div style="font-size: 0.8rem; margin-bottom: 0.2rem; color: #fca5a5;">• ${iss}</div>`).join('');
+        issuesHtml = log.issues.map(iss => `<div style="font-size: 0.8rem; margin-bottom: 0.2rem; color: #fca5a5;">• ${esc(iss)}</div>`).join('');
       } else {
         issuesHtml = '<span style="font-size: 0.8rem; color: var(--text-muted);">No QA flags / issues</span>';
       }
 
       tr.innerHTML = `
-        <td style="font-size: 0.75rem; font-family: monospace; white-space: nowrap;">${timeFormatted}</td>
+        <td style="font-size: 0.75rem; font-family: monospace; white-space: nowrap;">${esc(timeFormatted)}</td>
         <td style="font-weight: 600;">
-          <div>${log.patient_name || 'Unknown'}</div>
-          <div style="font-size: 0.75rem; color: var(--text-muted);">ID: ${log.patient_id || 'N/A'}</div>
+          <div>${esc(log.patient_name || 'Unknown')}</div>
+          <div style="font-size: 0.75rem; color: var(--text-muted);">ID: ${esc(log.patient_id || 'N/A')}</div>
         </td>
-        <td style="color: var(--text-muted); font-size: 0.85rem;">${log.protocol || 'Unknown'}</td>
-        <td><span class="badge badge-${(log.status || 'unknown').toLowerCase()}">${log.status || 'UNKNOWN'}</span></td>
+        <td style="color: var(--text-muted); font-size: 0.85rem;">${esc(log.protocol || 'Unknown')}</td>
+        <td>${statusBadge(log.status || 'UNKNOWN')}</td>
         <td style="max-width: 350px;">${issuesHtml}</td>
       `;
       tbody.appendChild(tr);

@@ -79,8 +79,8 @@ thresholds:
     def test_scan_with_clipped_couch_top_returns_pass_with_warning(self):
         """
         Deliverable 3 Assertion:
-        Verify that a scan with a clipped couch top returns PASS_WITH_WARNING
-        instead of a hard failure (FAIL_CRITICAL / REJECT).
+        Verify that a scan with a clipped couch top returns CONDITIONAL
+        instead of a hard failure (REJECT).
         """
         paths = self.create_ct_series(protocol="Pelvis Prostate", study_desc="Pelvis Study", num_slices=5)
 
@@ -106,20 +106,20 @@ thresholds:
         self.assertTrue(result.metrics["accessory_truncation_detected"], "Clipped couch must be flagged as accessory truncation")
         self.assertFalse(result.metrics["truncation_error"], "Patient body must NOT be flagged as truncated")
 
-        # 2. Verify GeometryGuardian flags PASS_WITH_WARNING
+        # 2. Verify GeometryGuardian flags CONDITIONAL
         gg_flags = [f for f in result.flags if f.name == "GeometryGuardian" and f.status != "SKIPPED"]
         self.assertEqual(len(gg_flags), 1)
-        self.assertEqual(gg_flags[0].status, "PASS_WITH_WARNING", "Clipped couch top must return PASS_WITH_WARNING")
+        self.assertEqual(gg_flags[0].status, "CONDITIONAL", "Clipped couch top must return CONDITIONAL")
         self.assertIn("Accessory / Positioning Device Truncated at FOV Edge", gg_flags[0].message)
 
-        # 3. Verify overall series status is PASS_WITH_WARNING (not FAIL_CRITICAL or REJECT)
-        self.assertEqual(result.status, "PASS_WITH_WARNING", "Overall status must be PASS_WITH_WARNING instead of hard failure")
+        # 3. Verify overall series status is CONDITIONAL (not REJECT)
+        self.assertEqual(result.status, "CONDITIONAL", "Overall status must be CONDITIONAL instead of hard failure")
 
     def test_critical_patient_body_truncation_fails_critically(self):
         """
         Condition A (Critical Failure):
         Patient body intersects outermost border ring in anterior/posterior sector.
-        Action: Output FAIL_CRITICAL ("Patient Body Truncation Detected").
+        Action: Output REJECT ("Patient Body Truncation Detected").
         """
         paths = self.create_ct_series(protocol="Pelvis Prostate", study_desc="Pelvis Study", num_slices=5)
 
@@ -137,9 +137,9 @@ thresholds:
         result = self.engine.analyze_series(paths)
 
         self.assertTrue(result.metrics["truncation_error"])
-        self.assertEqual(result.status, "FAIL_CRITICAL")
+        self.assertEqual(result.status, "REJECT")
 
-        gg_flags = [f for f in result.flags if f.name == "GeometryGuardian" and f.status == "FAIL_CRITICAL"]
+        gg_flags = [f for f in result.flags if f.name == "GeometryGuardian" and f.status == "REJECT"]
         self.assertEqual(len(gg_flags), 1)
         self.assertIn("TRUNCATION_ERROR: Patient Body Truncation Detected", gg_flags[0].message)
 
@@ -147,10 +147,10 @@ thresholds:
         """
         Task 3 Rule Matrix:
         Flared wingboard elbow clipping in Thorax/Breast:
-        - depth < 15 mm -> PASS_WITH_WARNING
-        - depth >= 15 mm -> FAIL_CRITICAL
+        - depth < 15 mm -> CONDITIONAL
+        - depth >= 15 mm -> REJECT
         """
-        # Case A: Depth = 10 mm (< 15 mm) on Thorax scan -> PASS_WITH_WARNING
+        # Case A: Depth = 10 mm (< 15 mm) on Thorax scan -> CONDITIONAL
         paths_tol = self.create_ct_series(protocol="Thorax Lung Scan", study_desc="Chest Thorax", num_slices=5)
         for i, path in enumerate(paths_tol):
             ds = pydicom.dcmread(path)
@@ -167,11 +167,11 @@ thresholds:
         result_tol = self.engine.analyze_series(paths_tol)
         self.assertFalse(result_tol.metrics["truncation_error"])
         self.assertIn(3, result_tol.metrics["tolerated_truncated_slices"])
-        gg_flags_tol = [f for f in result_tol.flags if f.name == "GeometryGuardian" and f.status == "PASS_WITH_WARNING"]
+        gg_flags_tol = [f for f in result_tol.flags if f.name == "GeometryGuardian" and f.status == "CONDITIONAL"]
         self.assertEqual(len(gg_flags_tol), 1)
         self.assertIn("Flared wingboard elbow clipping within clinical tolerance (<15mm)", gg_flags_tol[0].message)
 
-        # Case B: Depth = 20 mm (>= 15 mm) on Thorax scan -> FAIL_CRITICAL
+        # Case B: Depth = 20 mm (>= 15 mm) on Thorax scan -> REJECT
         paths_crit = self.create_ct_series(protocol="Thorax Lung Scan", study_desc="Chest Thorax", num_slices=5)
         for i, path in enumerate(paths_crit):
             ds = pydicom.dcmread(path)
@@ -185,7 +185,7 @@ thresholds:
 
         result_crit = self.engine.analyze_series(paths_crit)
         self.assertTrue(result_crit.metrics["truncation_error"])
-        self.assertEqual(result_crit.status, "FAIL_CRITICAL")
+        self.assertEqual(result_crit.status, "REJECT")
 
     def test_empty_air_slices_above_and_below_skipped(self):
         """
@@ -237,7 +237,7 @@ thresholds:
 
         cavity_flags = [f for f in result.flags if f.name == "CavityScout"]
         self.assertEqual(len(cavity_flags), 1)
-        self.assertEqual(cavity_flags[0].status, "PASS", "Gas < 15 cc must return PASS")
+        self.assertEqual(cavity_flags[0].status, "ACCEPT", "Gas < 15 cc must return ACCEPT")
         self.assertIn("within physiological limits", cavity_flags[0].message)
 
     def test_three_stage_anatomical_decoupling_masks(self):

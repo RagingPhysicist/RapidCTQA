@@ -1,17 +1,17 @@
-fastapi
+# Runtime dependencies. Test tooling lives in requirements-dev.txt.
+fastapi>=0.110,<1
 fpdf2==2.8.7
-numpy
-pydantic
-pydicom
-pynetdicom
-python-multipart
-pyyaml
+numpy>=1.26,<3
+pillow>=10
+pydantic>=2.6,<3
+pydicom>=3.0,<4
+pynetdicom>=3.0,<4
+python-multipart>=0.0.9
+pyyaml>=6,<7
 scipy==1.17.1
-uvicorn
-customtkinter
-matplotlib
-scikit-image
-pytest
-pytest-asyncio
+uvicorn>=0.29
+customtkinter>=5.2
+matplotlib>=3.8
+scikit-image>=0.22
 # Optional: for AI-based body segmentation (CPU: pip install TotalSegmentator, GPU: pip install TotalSegmentator torch)
 # totalsegmentator

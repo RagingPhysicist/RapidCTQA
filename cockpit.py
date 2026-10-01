@@ -4,74 +4,19 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import os, shutil, glob, sys, json, yaml
-import platform
 import threading
 from backend.engine import QAEngine
 from backend.dicom_sender import send_dicom_series
 
-# Load configuration
-def normalise_storage_path(path: str) -> str:
-    """
-    Normalise the storage path, falling back to mapped drive letter on Windows if needed,
-    or mapping UNC paths to /Volumes on macOS.
-    """
-    if not path:
-        return ""
+# Configuration: same storage resolution and thresholds as the web backend
+from backend import settings
+from backend.qa_config import load_qa_config
+from backend.status import QAStatus, try_normalize_status
 
-    system = platform.system()
-    if system == "Windows":
-        norm = os.path.normpath(path)
-        unc_prefix = "\\\\imgserver\\DICOM"
-        if norm.startswith(unc_prefix):
-            try:
-                # If network path is accessible directly, use it
-                if os.path.exists(unc_prefix):
-                    return norm
-            except Exception:
-                pass
-            
-            # Try S: drive fallback if UNC path is not accessible but S: exists
-            s_fallback = norm.replace(unc_prefix, "S:")
-            try:
-                if os.path.exists("S:\\") or os.path.exists("S:"):
-                    return s_fallback
-            except Exception:
-                pass
-        return norm
-    elif system == "Darwin":
-        # Map Windows UNC path to macOS /Volumes mount point
-        # Support both backslashes and forward slashes from config
-        p = path.replace("\\", "/")
-        unc_prefix = "//imgserver/DICOM"
-        if p.startswith(unc_prefix):
-            return p.replace(unc_prefix, "/Volumes/DICOM")
+STORAGE_DIR = settings.STORAGE_DIR
+METAL_THRESHOLD = load_qa_config(settings.QA_CONFIG_PATH).thresholds.implants.metal_threshold_hu
 
-    return path
-
-try:
-    with open("webApp.yaml", "r", encoding="utf-8") as f:
-        config_web = yaml.safe_load(f)
-
-    raw_storage_path = config_web.get("backend", {}).get("storage", {}).get("path", "")
-    STORAGE_DIR = normalise_storage_path(raw_storage_path)
-
-    if not STORAGE_DIR:
-        STORAGE_DIR = "./data/rtct"
-    elif not os.path.isabs(STORAGE_DIR):
-        # cockpit.py is in root, so just use it
-        pass
-except Exception as e:
-    print(f"Error loading webApp.yaml: {e}")
-    STORAGE_DIR = "./data/rtct"
-
-try:
-    with open("ctqa.yaml", "r", encoding="utf-8") as f:
-        config_ctqa = yaml.safe_load(f)
-    METAL_THRESHOLD = config_ctqa.get("thresholds", {}).get("implants", {}).get("metal_threshold_hu", 2000)
-except Exception:
-    METAL_THRESHOLD = 2000
-
-EXPORT_DIR = "./TPS_EXPORT"
+EXPORT_DIR = settings.EXPORT_DIR
 os.makedirs(EXPORT_DIR, exist_ok=True)
 
 class DICOMViewer(ctk.CTkFrame):
@@ -154,7 +99,7 @@ class ClinicalTriageApp(ctk.CTk):
         self.geometry("1100x800")
         ctk.set_appearance_mode("dark")
         
-        self.engine = QAEngine("ctqa.yaml")
+        self.engine = QAEngine(settings.QA_CONFIG_PATH)
         self.current_series_path = None
         self.current_series_uid = None
         self.after_id = None
@@ -290,7 +235,8 @@ class ClinicalTriageApp(ctk.CTk):
             self.flag_box.insert("end", "-"*30 + "\n")
             
             for flag in result.flags:
-                color = "RED" if flag.status in ("REJECT", "FAIL_CRITICAL") else "YELLOW" if flag.status in ("CONDITIONAL", "PASS_WITH_WARNING") else "GRAY" if flag.status == "SKIPPED" else "GREEN"
+                status = try_normalize_status(flag.status)
+                color = "RED" if status == QAStatus.REJECT else "YELLOW" if status == QAStatus.CONDITIONAL else "GRAY" if status == QAStatus.SKIPPED else "GREEN"
                 self.flag_box.insert("end", f"[{flag.status}] {flag.name}\n")
                 self.flag_box.insert("end", f" >> {flag.message}\n\n")
             
