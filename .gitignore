@@ -33,6 +33,9 @@ ENV/
 # Project Specific
 data/rtct/*
 !data/rtct/.gitkeep
+# Derived mask caches inside series storage (segmentations/<task>/body_dicom.npy)
+body_dicom.npy
+*.npy.tmp-*
 TPS_EXPORT/*
 !TPS_EXPORT/.gitkeep
 reports/

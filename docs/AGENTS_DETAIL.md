@@ -4,6 +4,12 @@ RapidCTQA uses a modular agent-based architecture to evaluate DICOM series. Each
 
 **Body mask**: when TotalSegmentator is installed, the engine runs its `body` task on each series and uses that mask for all agents; otherwise (or if it fails) it falls back to the rule-based segmentation that excludes the couch. With the TotalSegmentator mask, accessory/couch truncation is not reported (`metrics.used_totalsegmentator`).
 
+**Mask cache**: TotalSegmentator writes NIfTI masks (RAS). They are resampled once to DICOM voxel space (CT slices sorted by z) and stored as `<storage>/<series_uid>/segmentations/<task>/body_dicom.npy`, a (slices, rows, columns) bool array. The QA engine and the slice viewer both read this cache (the viewer through a read-only memmap, one slice per request).
+- **Building**: right after a TotalSegmentator run, and otherwise the first time the engine or viewer needs it. There is one builder per series (lock); the file is written to a temp file and moved into place with `os.replace`.
+- **Invalidation**: rebuilt when a source NIfTI is newer than the cache (re-segmentation) or the number of slices or matrix size no longer matches the series.
+- **While building**: the viewer resamples just the requested slice from an in-memory NIfTI (at most 2 series kept) instead of blocking.
+- The file is derived data and can be deleted at any time; it is git-ignored and removed with the series.
+
 Every check emits exactly one flag per series, with the measured value and limit in its message: `ACCEPT`, `INFO` (reported, not actionable), `CONDITIONAL`, `REJECT`, or `SKIPPED` (not applicable). The series verdict is `REJECT` if any flag rejects, otherwise `CONDITIONAL` if any flag needs review, otherwise `ACCEPT`; `INFO` never escalates. Only `ACCEPT` series are exported to the TPS automatically, and only `CONDITIONAL` / `REJECT` results go to the problem log.
 
 ## 1. GeometryGuardian
