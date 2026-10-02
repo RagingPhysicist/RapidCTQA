@@ -120,7 +120,6 @@ function _renderSeriesRow(tbody, study) {
       <div class="actions-cell">
         <button class="view-btn" onclick="viewStudy(${jsArg(study.series_uid)})">View Report</button>
         <button class="view-btn" style="background: var(--secondary);" onclick="launchCockpit(${jsArg(study.series_uid)})">View Scan</button>
-        <button class="btn-segment" onclick="runSegmentation(${jsArg(study.series_uid)}, null)" title="Run full TotalSegmentator segmentation">🫁 Segment Full</button>
       </div>
     </td>
   `;
@@ -151,11 +150,6 @@ function _render4DCTGroup(tbody, group) {
         <button class="view-btn" style="background: var(--secondary);"
           onclick="toggle4DCTGroup(this, ${jsArg(group.group_id)})">
           ${isExpanded ? '▲ Collapse' : `▼ ${esc(group.phase_count)} Phases`}
-        </button>
-        <button class="btn-segment"
-          onclick="runSegmentation(${jsArg(group.reference_phase_uid)}, ${jsArg(group.group_id)})"
-          title="Run TotalSegmentator on reference phase (${esc((group.reference_phase_uid || '').substring(0, 12))}…)">
-          🫁 Segment 4D Ref
         </button>
       </div>
     </td>
@@ -201,34 +195,6 @@ function toggle4DCTGroup(btn, groupId) {
   });
 
   btn.textContent = isNowExpanded ? '▲ Collapse' : '▼ Phases';
-}
-
-async function runSegmentation(seriesUid, groupId) {
-  if (!seriesUid) { alert('No series selected for segmentation.'); return; }
-
-  const msg = groupId
-    ? `Run full TotalSegmentator segmentation (task=total) on the 4DCT reference phase?\n\n(Phase UID: ${seriesUid.substring(0, 20)}…)`
-    : `Run full TotalSegmentator segmentation (task=total) on this series?`;
-
-  if (!confirm(msg)) return;
-
-  const url = groupId
-    ? `${API_BASE}/studies/group/${encodeURIComponent(groupId)}/segment`
-    : `${API_BASE}/viewer/${encodeURIComponent(seriesUid)}/segment`;
-
-  try {
-    const res = await apiPost(url, { task: 'total', device: 'cpu', fast: true, force: false });
-    const data = await res.json();
-    if (res.ok) {
-      alert(data.message || 'Segmentation started in background.');
-    } else if (res.status === 503) {
-      alert('⚠ TotalSegmentator is not installed.\n\nInstall it with:\n  pip install TotalSegmentator torch');
-    } else {
-      alert(`Segmentation request failed: ${data.detail || res.statusText}`);
-    }
-  } catch (err) {
-    alert(`Network error: ${err}`);
-  }
 }
 
 async function _updateCockpitSegmentationStatus(seriesUid) {
