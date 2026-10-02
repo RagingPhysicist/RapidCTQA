@@ -1,22 +1,25 @@
 import asyncio
-import io
+import hashlib
 import json
+import logging
 import os
 import shutil
+import time
 from datetime import datetime
 
 import numpy as np
 import pydicom
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
-from fastapi.responses import StreamingResponse
-from PIL import Image
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
+from fastapi.responses import Response
 
 from backend import settings, state
 from backend.dicom_sender import send_dicom_series
 from backend.models import SegmentationRequest
 from backend.security import is_valid_uid, valid_series_uid
 from backend.segmentation import SegmentationError
-from backend.utils import segment_patient_body_only
+from backend.viewer_cache import SeriesView, _SliceEntry, decode_hu, render_slice_png
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api")
 
@@ -107,63 +110,45 @@ def _render_slice_png(
     show_mask: bool = False,
     slice_mask: np.ndarray = None,
 ) -> bytes:
-    """Render a single DICOM slice as a PNG byte stream with W/L and optional overlays."""
-    ds = pydicom.dcmread(dcm_path)
-    img = ds.pixel_array.astype(np.float32)
-    slope = float(getattr(ds, 'RescaleSlope', 1.0))
-    intercept = float(getattr(ds, 'RescaleIntercept', 0.0))
-    img = img * slope + intercept
+    """Render one DICOM file directly (no caches). Kept for tools and tests;
+    the viewer endpoint uses the cached path below."""
+    view = SeriesView.from_headers([(dcm_path, pydicom.dcmread(dcm_path, stop_before_pixels=True))])
+    entry = _SliceEntry(decode_hu(dcm_path))
+    return render_slice_png(entry, window_width, window_level, metal_threshold,
+                            view.crosshair(0, reference_point), show_mask, slice_mask)
 
-    vmin = window_level - window_width / 2
-    vmax = window_level + window_width / 2
-    img_clipped = np.clip(img, vmin, vmax)
-    img_norm = ((img_clipped - vmin) / (vmax - vmin) * 255).astype(np.uint8)
 
-    rgb = np.stack([img_norm, img_norm, img_norm], axis=-1)
+def _slice_etag(series_uid, index, ww, wl, metal_threshold, mask, mask_version, file_path, reference_point) -> str:
+    try:
+        file_mtime = os.stat(file_path).st_mtime
+    except OSError:
+        file_mtime = None
+    key = repr((series_uid, index, ww, wl, metal_threshold, mask, mask_version, file_mtime, reference_point))
+    return '"' + hashlib.sha1(key.encode()).hexdigest()[:20] + '"'
 
-    # Patient mask overlay: filled body contour as a light blue tint
-    # (TotalSegmentator mask when available, rule-based otherwise)
-    if show_mask:
+
+def _render_job(series_uid, index, view, ww, wl, metal_threshold, reference_point, mask, timings):
+    t0 = time.perf_counter()
+    entry = state.slice_cache.get(series_uid, index, view.files[index])
+    t1 = time.perf_counter()
+    slice_mask = None
+    if mask:
         try:
-            if slice_mask is not None and slice_mask.shape == img.shape and np.any(slice_mask):
-                filled_mask = slice_mask
-            else:
-                filled_mask = segment_patient_body_only(img, tissue_threshold_hu=-300)
-            if np.any(filled_mask):
-                rgb[filled_mask] = (rgb[filled_mask].astype(np.float32) * 0.75 + np.array([50, 150, 250], dtype=np.float32) * 0.25).astype(np.uint8)
+            slice_mask = state.segmentation_service.get_mask_slice(
+                series_uid, index, expected_shape=view.geometry.shape,
+                slice_geometry=view.geometry.slices[index])
         except Exception as e:
-            print(f"Error drawing patient mask: {e}")
-
-    # Metal overlay: pixels above threshold -> red
-    metal_mask = img > metal_threshold
-    if np.any(metal_mask):
-        rgb[metal_mask] = np.array([220, 50, 50], dtype=np.uint8)
-
-    # Reference point crosshair
-    if reference_point:
-        try:
-            img_z = float(ds.ImagePositionPatient[2])
-            slice_thickness = float(getattr(ds, 'SliceThickness', 2.0))
-            if abs(img_z - reference_point['z']) < (slice_thickness / 2.0):
-                origin = ds.ImagePositionPatient
-                spacing = ds.PixelSpacing  # [row spacing, column spacing]
-                px_x = int((reference_point['x'] - float(origin[0])) / float(spacing[1]))
-                px_y = int((reference_point['y'] - float(origin[1])) / float(spacing[0]))
-                rows, cols = rgb.shape[0], rgb.shape[1]
-                if 0 <= px_x < cols and 0 <= px_y < rows:
-                    size = 10
-                    rgb[max(0, px_y - size):min(rows, px_y + size), px_x] = [255, 255, 0]
-                    rgb[px_y, max(0, px_x - size):min(cols, px_x + size)] = [255, 255, 0]
-        except Exception as e:
-            print(f"Error drawing reference point: {e}")
-
-    buf = io.BytesIO()
-    Image.fromarray(rgb, mode='RGB').save(buf, format='PNG', optimize=False)
-    return buf.getvalue()
+            print(f"Error loading TotalSegmentator slice mask: {e}")
+    t2 = time.perf_counter()
+    png = render_slice_png(entry, ww, wl, metal_threshold, view.crosshair(index, reference_point), mask, slice_mask)
+    t3 = time.perf_counter()
+    timings.update(hu=t1 - t0, mask=t2 - t1, render=t3 - t2)
+    return png
 
 
 @router.get("/viewer/{series_uid}/slice/{index}")
 async def viewer_slice(
+    request: Request,
     index: int,
     series_uid: str = Depends(valid_series_uid),
     ww: float = Query(default=400.0),
@@ -171,38 +156,42 @@ async def viewer_slice(
     metal: bool = Query(default=True),
     mask: bool = Query(default=False),
 ):
-    """Single DICOM slice as a PNG image with W/L and metal overlay applied."""
-    dicom_files = state.get_series_ct_files(series_uid)
-    if not dicom_files:
+    """Single DICOM slice as a PNG image with W/L and metal overlay applied.
+
+    Warm requests read no DICOM headers and no NIfTI: the file list and
+    geometry, decoded HU slices and the DICOM-space body mask are cached.
+    Responses carry an ETag and may be cached by the browser for an hour.
+    """
+    t_start = time.perf_counter()
+    view = await asyncio.get_running_loop().run_in_executor(state.viewer_pool, state.get_series_view, series_uid)
+    if not view.files:
         raise HTTPException(status_code=404, detail="Series not found")
-    if index < 0 or index >= len(dicom_files):
-        raise HTTPException(status_code=400, detail=f"Slice index out of range (0–{len(dicom_files)-1})")
+    if index < 0 or index >= len(view.files):
+        raise HTTPException(status_code=400, detail=f"Slice index out of range (0–{len(view.files)-1})")
 
     metal_threshold = state.engine.thresholds.implants.metal_threshold_hu if metal else 1e9
+    result = state.results_cache.get(series_uid)
+    reference_point = result.metrics.get("reference_point") if result else None
+    mask_version = state.segmentation_service.mask_version(series_uid) if mask else None
 
-    reference_point = None
-    if series_uid in state.results_cache:
-        reference_point = state.results_cache[series_uid].metrics.get("reference_point")
+    etag = _slice_etag(series_uid, index, ww, wl, metal_threshold, mask, mask_version, view.files[index], reference_point)
+    headers = {"Cache-Control": "private, max-age=3600", "ETag": etag}
+    if request.headers.get("if-none-match") == etag:
+        return Response(status_code=304, headers=headers)
 
-    ts_slice_mask = None
-    if mask:
-        try:
-            ts_3d_mask = state.segmentation_service.load_body_mask(series_uid)
-            if ts_3d_mask is not None and 0 <= index < ts_3d_mask.shape[0]:
-                ts_slice_mask = ts_3d_mask[index]
-        except Exception as e:
-            print(f"Error loading TotalSegmentator slice mask: {e}")
-
+    timings: dict = {}
     try:
         png_bytes = await asyncio.get_running_loop().run_in_executor(
-            state.analysis_pool,
-            _render_slice_png,
-            dicom_files[index], ww, wl, metal_threshold, reference_point, mask, ts_slice_mask,
+            state.viewer_pool, _render_job,
+            series_uid, index, view, ww, wl, metal_threshold, reference_point, mask, timings,
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Slice render failed: {e}")
 
-    return StreamingResponse(io.BytesIO(png_bytes), media_type="image/png")
+    timings["total"] = time.perf_counter() - t_start
+    headers["Server-Timing"] = ", ".join(f"{k};dur={v * 1000:.1f}" for k, v in timings.items())
+    logger.debug("slice %s[%d] mask=%s %s", series_uid, index, mask, headers["Server-Timing"])
+    return Response(content=png_bytes, media_type="image/png", headers=headers)
 
 
 def _require_segmentation():
@@ -362,7 +351,7 @@ async def reject_series(series_uid: str = Depends(valid_series_uid)):
 
         with state.results_cache_lock:
             state.results_cache.pop(series_uid, None)
-            state.ct_files_cache.pop(series_uid, None)
+        state.invalidate_viewer_caches(series_uid)
 
         with open(os.path.join(settings.ROOT_DIR, "rejections.log"), "a", encoding="utf-8") as f:
             f.write(f"{datetime.now().isoformat()} - {series_uid} rejected and deleted\n")

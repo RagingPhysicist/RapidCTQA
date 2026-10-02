@@ -25,6 +25,7 @@ from backend.reporter import generate_pdf_report
 from backend.security import is_valid_uid, series_dir
 from backend.segmentation import SegmentationService
 from backend.status import QAStatus
+from backend.viewer_cache import SeriesView, SliceLRU
 
 
 results_cache: Dict[str, QAResult] = {}
@@ -38,6 +39,12 @@ fourdct_cache_lock = threading.Lock()
 
 # Pool for concurrent series analysis (IO + CPU-bound work per series)
 analysis_pool = ThreadPoolExecutor(max_workers=4)
+# Separate pool for slice rendering, so scrolling never waits behind an analysis
+viewer_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="viewer")
+
+# Viewer caches: per-series file list + geometry, and decoded HU slices
+series_views: Dict[str, SeriesView] = {}
+slice_cache = SliceLRU(max_slices=160)
 
 segmentation_service = SegmentationService(storage_dir=settings.STORAGE_DIR)
 
@@ -104,8 +111,8 @@ def on_series_received(series_uid: str):
     result = engine.analyze_series(dicom_files)
     with results_cache_lock:
         results_cache[series_uid] = result
-        # The file list may have grown since the viewer last cached it
-        ct_files_cache.pop(series_uid, None)
+    # The file list may have grown since the viewer last cached it
+    invalidate_viewer_caches(series_uid)
 
     # 4DCT: metal is evaluated once per group. Applying the group policy here
     # (before logging and export) also updates sibling phases.
@@ -199,28 +206,43 @@ def series_status(series_uid: str) -> QAStatus:
     return QAStatus(cached.status) if cached else QAStatus.PENDING
 
 
+def get_series_view(series_uid: str) -> SeriesView:
+    """Sorted CT files and per-slice geometry of a series, read once (headers only)."""
+    with results_cache_lock:
+        view = series_views.get(series_uid)
+        if view is not None:
+            return view
+
+    headers = []
+    for f in glob.glob(os.path.join(storage_path(series_uid), "*.dcm")):
+        try:
+            ds = pydicom.dcmread(f, stop_before_pixels=True)
+            if ds.SOPClassUID == CT_IMAGE_STORAGE:
+                headers.append((f, ds))
+        except Exception:
+            continue
+    headers.sort(key=lambda h: float(getattr(h[1], 'ImagePositionPatient', [0, 0, 0])[2]))
+    view = SeriesView.from_headers(headers)
+
+    with results_cache_lock:
+        series_views[series_uid] = view
+        ct_files_cache[series_uid] = view.files
+    return view
+
+
 def get_series_ct_files(series_uid: str) -> List[str]:
     """CT image files of a series sorted by Z position (cached)."""
     with results_cache_lock:
         if series_uid in ct_files_cache:
             return ct_files_cache[series_uid]
+    return get_series_view(series_uid).files
 
-    all_files = glob.glob(os.path.join(storage_path(series_uid), "*.dcm"))
-    ct_files = []
-    for f in all_files:
-        try:
-            ds = pydicom.dcmread(f, stop_before_pixels=True)
-            if ds.SOPClassUID == CT_IMAGE_STORAGE:
-                ct_files.append((f, float(getattr(ds, 'ImagePositionPatient', [0, 0, 0])[2])))
-        except Exception:
-            continue
 
-    ct_files.sort(key=lambda x: x[1])
-    sorted_paths = [f[0] for f in ct_files]
-
+def invalidate_viewer_caches(series_uid: str) -> None:
     with results_cache_lock:
-        ct_files_cache[series_uid] = sorted_paths
-    return sorted_paths
+        ct_files_cache.pop(series_uid, None)
+        series_views.pop(series_uid, None)
+    slice_cache.invalidate(series_uid)
 
 
 def cleanup_old_directories(now: Optional[datetime] = None):

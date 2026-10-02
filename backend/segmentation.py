@@ -43,12 +43,16 @@ import logging
 import os
 import shutil
 import tempfile
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 import numpy as np
 
+from backend import mask_cache
 from backend.security import is_valid_uid, safe_child_path, series_dir
+
+CT_IMAGE_STORAGE = '1.2.840.10008.5.1.4.1.1.2'
 
 logger = logging.getLogger(__name__)
 
@@ -231,6 +235,11 @@ class SegmentationService:
         """
         self.storage_dir = storage_dir
         self._adapter: Optional[TotalSegmentatorAdapter] = None
+        # DICOM-space mask cache: one build lock per (series, task), open memmaps, NIfTI LRU
+        self._locks: Dict[Tuple[str, str], threading.Lock] = {}
+        self._locks_guard = threading.Lock()
+        self._memmaps: Dict[str, Tuple[tuple, np.ndarray]] = {}
+        self._nifti_lru = mask_cache.NiftiLRU(max_entries=2)
 
     # ------------------------------------------------------------------
     # Adapter — lazy init so import errors surface on first use, not startup
@@ -297,152 +306,200 @@ class SegmentationService:
         target_shape: Optional[Tuple[int, int, int]] = None,
     ) -> Optional[np.ndarray]:
         """
-        Load existing body segmentation NIfTI mask for a series as a 3D boolean numpy array,
-        reorienting and remapping it to match DICOM voxel coordinates (D, H, W).
+        Body segmentation mask of a series as a 3D bool array (D, H, W) in
+        DICOM voxel order (CT slices sorted by z).
 
-        Parameters
-        ----------
-        series_uid:
-            The SeriesInstanceUID.
-        task:
-            Task name (default: 'body').
-        datasets:
-            Optional list of DICOM datasets sorted by Z position for physical coordinate mapping.
-        target_shape:
-            Expected (D, H, W) volume shape for alignment verification.
-
-        Returns
-        -------
-        Optional[np.ndarray]
-            3D boolean numpy array of shape (D, H, W) matching DICOM volume indexing,
-            or None if no segmentation is cached/available.
+        Uses the persisted DICOM-space cache (see :meth:`get_body_mask_dicom_space`),
+        building it on first use. Without DICOM geometry (no ``datasets`` and no
+        readable headers in storage) the NIfTI is only transposed, as before.
+        Returns None if no segmentation exists.
         """
         if not is_valid_uid(series_uid):
             return None
-        cached = self._cached_result(series_uid, task)
-        if cached is None or not cached.mask_files:
+        sources = self._mask_sources(series_uid, task)
+        if not sources:
             return None
 
-        try:
-            import nibabel as nib
-        except ImportError:
-            logger.warning("nibabel is not installed; cannot load NIfTI segmentation mask.")
-            return None
-
-        # Discover datasets if not provided
-        if datasets is None:
-            input_dir = series_dir(self.storage_dir, series_uid)
-            if os.path.isdir(input_dir):
-                import glob
-                import pydicom
-                dcm_files = glob.glob(os.path.join(input_dir, "*.dcm"))
-                loaded_ds = []
-                for f in dcm_files:
-                    try:
-                        ds = pydicom.dcmread(f, stop_before_pixels=True)
-                        if getattr(ds, 'SOPClassUID', '') == '1.2.840.10008.5.1.4.1.1.2':
-                            loaded_ds.append(ds)
-                    except Exception:
-                        continue
-                if loaded_ds:
-                    loaded_ds.sort(key=lambda x: float(getattr(x, 'ImagePositionPatient', [0, 0, 0])[2]))
-                    datasets = loaded_ds
-
-        # Prioritise 'body' label, fallback to combining all available mask files
-        mask_files_to_load = []
-        if "body" in cached.mask_files:
-            mask_files_to_load.append(cached.mask_files["body"])
+        mask = self.get_body_mask_dicom_space(series_uid, task=task, datasets=datasets)
+        if mask is not None:
+            mask = np.array(mask, dtype=bool)
         else:
-            mask_files_to_load = list(cached.mask_files.values())
+            mask = self._transposed_mask(sources, target_shape)
 
-        if not mask_files_to_load:
+        if mask is not None and target_shape is not None and mask.shape != tuple(target_shape):
+            logger.warning(
+                "Segmentation mask shape %s does not match target shape %s for series %s",
+                mask.shape, target_shape, series_uid
+            )
+        return mask
+
+    # ------------------------------------------------------------------
+    # DICOM-space mask cache
+    # ------------------------------------------------------------------
+
+    def _mask_sources(self, series_uid: str, task: str) -> List[str]:
+        """NIfTI files that make up the body mask: 'body' if present, else every mask."""
+        try:
+            out_dir = self.output_dir_for(series_uid, task)
+            names = sorted(os.listdir(out_dir))
+        except (OSError, ValueError):
+            return []
+        nifti = {n.replace(".nii.gz", "").replace(".nii", ""): os.path.join(out_dir, n)
+                 for n in names if n.endswith(".nii.gz") or n.endswith(".nii")}
+        if "body" in nifti:
+            return [nifti["body"]]
+        return list(nifti.values())
+
+    def mask_cache_path(self, series_uid: str, task: str = DEFAULT_TASK) -> str:
+        return os.path.join(self.output_dir_for(series_uid, task), mask_cache.CACHE_FILENAME)
+
+    def mask_version(self, series_uid: str, task: str = DEFAULT_TASK) -> Optional[float]:
+        """Newest mtime of the mask's NIfTI files (None if not segmented). Cheap: stat only."""
+        try:
+            sources = self._mask_sources(series_uid, task)
+            return max(os.stat(src).st_mtime for src in sources) if sources else None
+        except OSError:
             return None
 
-        combined_mask: Optional[np.ndarray] = None
+    def _series_lock(self, series_uid: str, task: str) -> threading.Lock:
+        with self._locks_guard:
+            return self._locks.setdefault((series_uid, task), threading.Lock())
 
-        for path in mask_files_to_load:
-            if not os.path.isfile(path):
-                continue
+    def _read_geometry(self, series_uid: str):
+        """DICOM geometry of the series' CT images in storage (header reads; build path only)."""
+        import glob
+        import pydicom
+        loaded = []
+        for f in glob.glob(os.path.join(series_dir(self.storage_dir, series_uid), "*.dcm")):
             try:
-                nii = nib.load(path)
-                nifti_data = nii.get_fdata()
+                ds = pydicom.dcmread(f, stop_before_pixels=True)
+                if getattr(ds, 'SOPClassUID', '') == CT_IMAGE_STORAGE:
+                    loaded.append(ds)
+            except Exception:
+                continue
+        if not loaded:
+            return None
+        loaded.sort(key=lambda x: float(getattr(x, 'ImagePositionPatient', [0, 0, 0])[2]))
+        return mask_cache.geometry_from_datasets(loaded)
 
-                if nifti_data.ndim != 3:
-                    continue
+    def _open_cache(self, path: str, sources: List[str], expected_shape) -> Optional[np.ndarray]:
+        """Read-only memmap of a fresh cache file, reusing an already open handle."""
+        try:
+            st = os.stat(path)
+            signature = (st.st_mtime, st.st_size, tuple(os.stat(src).st_mtime for src in sources))
+        except OSError:
+            return None
+        with self._locks_guard:
+            hit = self._memmaps.get(path)
+        if hit is not None and hit[0] == signature:
+            mm = hit[1]
+        elif mask_cache.cache_is_fresh(path, sources):
+            mm = np.load(path, mmap_mode="r")
+            with self._locks_guard:
+                self._memmaps[path] = (signature, mm)
+        else:
+            return None
+        if expected_shape is not None and tuple(mm.shape) != tuple(expected_shape):
+            return None
+        return mm
 
-                if datasets and len(datasets) > 0:
-                    D = len(datasets)
-                    H = int(getattr(datasets[0], 'Rows', 512))
-                    W = int(getattr(datasets[0], 'Columns', 512))
+    def get_body_mask_dicom_space(
+        self,
+        series_uid: str,
+        task: str = DEFAULT_TASK,
+        datasets: Optional[List[Any]] = None,
+        expected_shape: Optional[Tuple[int, int, int]] = None,
+    ) -> Optional[np.ndarray]:
+        """Read-only memmap (D, H, W) bool of the body mask in DICOM voxel space.
 
-                    Nx, Ny, Nz = nifti_data.shape[:3]
-                    inv_affine = np.linalg.inv(nii.affine)
+        Stored as ``segmentations/<task>/body_dicom.npy`` and built once
+        (atomically, one builder per series) from the NIfTI. Rebuilt when a
+        NIfTI is newer than the cache or the shape does not match the series.
+        Returns None if there is no segmentation or no DICOM geometry.
+        """
+        if not is_valid_uid(series_uid):
+            return None
+        sources = self._mask_sources(series_uid, task)
+        if not sources:
+            return None
+        geometry = mask_cache.geometry_from_datasets(datasets) if datasets else None
+        if expected_shape is None and geometry is not None:
+            expected_shape = geometry.shape
+        path = self.mask_cache_path(series_uid, task)
 
-                    cols = np.arange(W)
-                    rows = np.arange(H)
-                    C, R = np.meshgrid(cols, rows)
+        mm = self._open_cache(path, sources, expected_shape)
+        if mm is not None:
+            return mm
+        with self._series_lock(series_uid, task):
+            mm = self._open_cache(path, sources, expected_shape)  # built while we waited
+            if mm is not None:
+                return mm
+            geometry = geometry or self._read_geometry(series_uid)
+            if geometry is None:
+                return None
+            volumes = [mask_cache.load_nifti_mask(src) for src in sources]
+            mask = mask_cache.resample_to_dicom(volumes, geometry.rows, geometry.columns, geometry.slices)
+            mask_cache.write_atomic(path, mask)
+            logger.info("Built DICOM-space mask cache %s %s", path, mask.shape)
+        # Return what was just built (not re-validated: a NIfTI with a skewed
+        # clock must not make this call return None)
+        return np.load(path, mmap_mode="r")
 
-                    mask_3d = np.zeros((D, H, W), dtype=bool)
+    def get_mask_slice(
+        self,
+        series_uid: str,
+        index: int,
+        task: str = DEFAULT_TASK,
+        expected_shape: Optional[Tuple[int, int, int]] = None,
+        slice_geometry: Optional["mask_cache.SliceGeometry"] = None,
+    ) -> Optional[np.ndarray]:
+        """One (H, W) bool mask slice for the viewer, without blocking on a build.
 
-                    for s in range(D):
-                        ds = datasets[s]
-                        pos = getattr(ds, 'ImagePositionPatient', [0.0, 0.0, float(s)])
-                        iop = getattr(ds, 'ImageOrientationPatient', [1.0, 0.0, 0.0, 0.0, 1.0, 0.0])
-                        spacing = getattr(ds, 'PixelSpacing', [1.0, 1.0])
-                        dy, dx = float(spacing[0]), float(spacing[1])
-                        rx, ry, rz = float(iop[0]), float(iop[1]), float(iop[2])
-                        cx, cy, cz = float(iop[3]), float(iop[4]), float(iop[5])
+        With a fresh cache this reads one slice from the memmap. Otherwise the
+        cache is built in the background and this slice is resampled from an
+        in-memory NIfTI (LRU of 2 series), so a request never resamples a volume.
+        """
+        sources = self._mask_sources(series_uid, task)
+        if not sources:
+            return None
+        mm = self._open_cache(self.mask_cache_path(series_uid, task), sources, expected_shape)
+        if mm is not None:
+            return np.array(mm[index], dtype=bool) if 0 <= index < mm.shape[0] else None
 
-                        X_lps = pos[0] + C * dx * rx + R * dy * cx
-                        Y_lps = pos[1] + C * dx * ry + R * dy * cy
-                        Z_lps = pos[2] + C * dx * rz + R * dy * cz
+        self._build_in_background(series_uid, task)
+        if slice_geometry is None or expected_shape is None:
+            return None
+        volumes = self._nifti_lru.get(sources)
+        return mask_cache.resample_to_dicom(volumes, expected_shape[1], expected_shape[2], [slice_geometry])[0]
 
-                        X_ras = -X_lps
-                        Y_ras = -Y_lps
-                        Z_ras = Z_lps
+    def _build_in_background(self, series_uid: str, task: str) -> None:
+        if self._series_lock(series_uid, task).locked():
+            return  # already building
 
-                        I_nii = inv_affine[0,0]*X_ras + inv_affine[0,1]*Y_ras + inv_affine[0,2]*Z_ras + inv_affine[0,3]
-                        J_nii = inv_affine[1,0]*X_ras + inv_affine[1,1]*Y_ras + inv_affine[1,2]*Z_ras + inv_affine[1,3]
-                        K_nii = inv_affine[2,0]*X_ras + inv_affine[2,1]*Y_ras + inv_affine[2,2]*Z_ras + inv_affine[2,3]
+        def _build():
+            try:
+                self.get_body_mask_dicom_space(series_uid, task=task)
+            except Exception as exc:
+                logger.warning("Building mask cache for %s failed: %s", series_uid, exc)
+        threading.Thread(target=_build, name=f"mask-cache-{series_uid[-12:]}", daemon=True).start()
 
-                        I_idx = np.round(I_nii).astype(int)
-                        J_idx = np.round(J_nii).astype(int)
-                        K_idx = np.round(K_nii).astype(int)
-
-                        valid = (0 <= I_idx) & (I_idx < Nx) & (0 <= J_idx) & (J_idx < Ny) & (0 <= K_idx) & (K_idx < Nz)
-
-                        slice_m = np.zeros((H, W), dtype=bool)
-                        slice_m[valid] = nifti_data[I_idx[valid], J_idx[valid], K_idx[valid]] > 0
-                        mask_3d[s] = slice_m
-                else:
-                    # Fallback transpose if datasets DICOM info is unavailable
-                    if target_shape is not None:
-                        D, H, W = target_shape
-                        if nifti_data.shape == (W, H, D):
-                            arr = np.transpose(nifti_data, (2, 1, 0))
-                        elif nifti_data.shape == (D, H, W):
-                            arr = nifti_data
-                        else:
-                            arr = np.transpose(nifti_data, (2, 1, 0))
-                    else:
-                        arr = np.transpose(nifti_data, (2, 1, 0))
-                    mask_3d = arr > 0
-
-                if combined_mask is None:
-                    combined_mask = mask_3d
-                else:
-                    combined_mask = combined_mask | mask_3d
+    def _transposed_mask(self, sources: List[str], target_shape) -> Optional[np.ndarray]:
+        """Fallback without DICOM geometry: transpose NIfTI (W, H, D) to (D, H, W)."""
+        combined = None
+        for path in sources:
+            try:
+                data, _ = mask_cache.load_nifti_mask(path)
             except Exception as exc:
                 logger.warning("Failed to read NIfTI mask %s: %s", path, exc)
-
-        if combined_mask is not None and target_shape is not None:
-            if combined_mask.shape != target_shape:
-                logger.warning(
-                    "Segmentation mask shape %s does not match target shape %s for series %s",
-                    combined_mask.shape, target_shape, series_uid
-                )
-
-        return combined_mask
+                continue
+            if data.ndim != 3:
+                continue
+            if target_shape is not None and data.shape == tuple(target_shape):
+                arr = data
+            else:
+                arr = np.transpose(data, (2, 1, 0))
+            combined = arr if combined is None else combined | arr
+        return combined
 
     def run_body_segmentation(
         self,
@@ -539,6 +596,11 @@ class SegmentationService:
                 "Segmentation complete: series=%s task=%s masks=%d",
                 series_uid, task, len(final_masks),
             )
+            # Build the DICOM-space cache now, so the viewer never pays for it
+            try:
+                self.get_body_mask_dicom_space(series_uid, task=task)
+            except Exception as exc:
+                logger.warning("Could not build mask cache for %s: %s", series_uid, exc)
             return SegmentationResult(
                 series_uid=series_uid,
                 task=task,
