@@ -53,6 +53,7 @@ pytest
 - `backend/test_implant_auditor.py`: Tests for metal detection logic.
 - `backend/test_dicom_sender.py`: Tests for DICOM networking/egress.
 - `backend/test_refined_pca.py`: Tests for advanced geometry/alignment logic.
+- `backend/test_alert_fatigue.py`: INFO status, one flag per check, protocol overrides, metal/gas/thickness tiers, truncation classes, roll phantoms and the 4DCT metal policy.
 - `backend/test_hardening.py`: Config validation, status normalisation, UID/path checks, listener and cleanup behaviour.
 - `backend/test_rejection.py`: Reject endpoint, CSRF and client allow-list.
 

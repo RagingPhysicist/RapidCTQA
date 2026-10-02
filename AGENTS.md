@@ -17,7 +17,8 @@ This file provides critical context and instructions for AI agents working on th
     - **Metal**: Threshold defined in `ctqa.yaml` (default: 3000 HU).
 - **Truncation Detection**: Checks whether the filled patient body mask touches the image border ring; lateral tolerances per protocol are in `ctqa.yaml` (`thresholds.geometry`).
 - **Thresholds**: Every clinical limit lives in `ctqa.yaml` and is validated by `backend/qa_config.py`; agent logic is in `backend/agents/`. Don't hardcode new limits.
-- **Status vocabulary**: Use `backend/status.py` (`QAStatus.ACCEPT` / `CONDITIONAL` / `REJECT` / `SKIPPED`). Don't introduce new status strings.
+- **Status vocabulary**: Use `backend/status.py` (`QAStatus.ACCEPT` / `CONDITIONAL` / `REJECT` / `INFO` / `SKIPPED`). Don't introduce new status strings. Only `CONDITIONAL` / `REJECT` are actionable; `INFO` must never escalate a verdict.
+- **One flag per check**: every agent's `evaluate` returns a flag for each of its checks on every run, with the measured value and the limit in the message.
 
 ### 3. Verification & Safety
 - **Report Verification**: QA findings for truncation, metal, and gas pockets include specific 1-indexed slice numbers. Always verify these ranges when modifying detection logic.

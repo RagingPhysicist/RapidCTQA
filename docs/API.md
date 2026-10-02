@@ -11,7 +11,9 @@ The default base URL for the API is `http://localhost:8080/api`.
 - `series_uid` path parameters must be DICOM UIDs (digits and dots, max 64 characters); anything else is `400`.
 
 ## Status values
-`ACCEPT`, `CONDITIONAL`, `REJECT` for flags and series verdicts, `SKIPPED` for informational flags, `PENDING` / `INGESTING` for series not analysed yet. See `backend/status.py`.
+`ACCEPT`, `CONDITIONAL`, `REJECT` for flags and series verdicts; `INFO` (reported value, never escalates) and `SKIPPED` (not applicable) on flags only; `PENDING` / `INGESTING` for series not analysed yet. See `backend/status.py`. Legacy values (`PASS`, `PASS_WITH_WARNING`, `FAIL_CRITICAL`) are still accepted as `status` filters for `/api/logs`.
+
+Every check returns one flag per series, so `flags` in `/api/studies/{series_uid}` lists all checks, not only problems. `/api/logs` only contains results with `CONDITIONAL` / `REJECT` flags.
 
 ## Endpoints
 

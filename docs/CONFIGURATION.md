@@ -48,17 +48,45 @@ There is no per-user authentication; anyone on an allowed client can approve and
 ## ctqa.yaml
 Every key in this file is read by the engine and validated at startup (`backend/qa_config.py`). Unknown or misspelled keys stop the application, so an edit either takes effect or fails loudly. The checks themselves are implemented in `backend/agents/*.py`; [AGENTS_DETAIL.md](AGENTS_DETAIL.md) lists which key drives which check.
 
-| Section | Keys |
+### `thresholds`
+| Section | Keys (defaults) |
 |---------|------|
-| `geometry` | `edge_buffer_px`, `min_edge_pixels`, `lateral_tolerance_mm.{lenient,head_neck,default}`, `accessory_lateral_tolerance_mm`, `lenient_protocol_keywords`, `head_neck_keywords`, `max_slice_spacing_variation_mm`, `max_gantry_tilt_deg` |
-| `slice_thickness` | `preferred_max_mm`, `absolute_max_mm` |
-| `integrity` | `min_slice_count`, `adult_age_years` |
-| `noise` | `corner_roi_px`, `max_background_air_sd_hu` |
-| `hu` | `air_range` |
-| `fluid` | `optimal_range_hu`, `conditional_max_hu` |
-| `gas` | `conditional_cc`, `reject_cc`, `leak_cc`, `couch_exclusion_mm`, `pelvis_keywords` |
-| `implants` | `metal_threshold_hu`, `max_volume_cc`, `internal_margin_mm`, `marker_max_volume_cc` |
-| `alignment` | `max_allowable_tilt_deg`, `min_confidence`, `symmetry_gate`, `hu_floor`, `angular_step_deg` |
+| `geometry` | `edge_buffer_px` (3), `min_edge_pixels` (5), `torso_core_opening_mm` (30), `max_lateral_truncation_z_mm` (12), `max_slice_spacing_variation_mm` (1.0), `max_gantry_tilt_deg` (1.0) |
+| `slice_thickness` | `nominal_mm` (null), `tolerance_mm` (0.5), `absolute_max_mm` (5.0) |
+| `integrity` | `min_slice_count` (5), `adult_age_years` (18) |
+| `noise` | `corner_roi_px` (20), `max_background_air_sd_hu` (15) |
+| `hu` | `air_range` ([-1100, -900]) |
+| `fluid` | `search_range_hu` ([0, 30]), `fallback_search_range_hu` ([0, 50]), `optimal_range_hu` ([0, 40]), `conditional_max_hu` (50) |
+| `gas` | `info_max_cc` (30), `large_cc` (75), `reject_cc` (150, `null` = never), `max_gas_body_fraction` (0.10), `couch_exclusion_mm` (15), `pelvis_keywords` |
+| `implants` | `metal_threshold_hu` (3000), `internal_info_max_cc` (2), `surface_info_max_cc` (10), `external_info_max_cc` (5), `pelvis_internal_conditional_cc` (5), `pelvis_keywords`, `internal_margin_mm` (10), `marker_max_volume_cc` (0.1) |
+| `alignment` | `info_deg` (1.5), `conditional_deg` (3.0), `min_correlation` (0.90), `search_range_deg` (30), `step_deg` (0.25), `edge_margin_deg` (0.5), `hu_floor` (-300), `hu_ceiling` (300), `downsample` (4) |
+
+How the tiers map to flags:
+- **Metal** (per class: internal / surface / external): none `ACCEPT`, below `<class>_info_max_cc` `INFO`, at or above `CONDITIONAL`. On scans matching `implants.pelvis_keywords`, internal metal at or above `pelvis_internal_conditional_cc` is `CONDITIONAL` even if an override raised the internal limit.
+- **Gas**: below `info_max_cc` `INFO`, from `info_max_cc` `CONDITIONAL` ("large" above `large_cc`), above `reject_cc` `REJECT`. If gas exceeds `max_gas_body_fraction` of the evaluated body volume, the body mask is suspect: one `CONDITIONAL` sanity flag, and the gas value is reported as unreliable `INFO`.
+- **Slice thickness**: above `absolute_max_mm` `REJECT`; otherwise `CONDITIONAL` only when `|measured - nominal_mm| > tolerance_mm`. With `nominal_mm: null` there is no thickness warning.
+- **Truncation**: anterior/posterior contact `REJECT`; lateral torso contact `CONDITIONAL` up to `max_lateral_truncation_z_mm` of z-extent (affected slices × slice spacing), `REJECT` beyond; arm/elbow with the torso clear and accessory-only contact are `INFO`.
+- **Roll**: `|roll|` above `info_deg` `INFO`, above `conditional_deg` `CONDITIONAL`; correlation below `min_correlation` or a best angle within `edge_margin_deg` of `search_range_deg` gives an "unreliable" `INFO`.
+
+### `protocol_overrides`
+A list of `{match, thresholds}` entries. Every entry whose `match` occurs in the series' ProtocolName (case-insensitive substring) is deep-merged over `thresholds`, in file order, with later entries winning. Overrides use the same keys and are validated at startup. The keys applied to a series are recorded in its `protocol_overrides_applied` metric.
+
+```yaml
+protocol_overrides:
+  - match: ABD                     # bowel gas is expected: never reject on volume
+    thresholds:
+      gas: {reject_cc: null}
+  - match: HEAD
+    thresholds:
+      slice_thickness: {nominal_mm: 2.0}
+  - match: THORAX
+    thresholds:
+      slice_thickness: {nominal_mm: 3.0, tolerance_mm: 0.5}
+```
+
+The shipped file only contains the `ABD` gas override. Nominal slice thicknesses are site protocol settings: add one entry per protocol.
 
 ### Status values
-Flags and series use one vocabulary, defined in `backend/status.py`: `ACCEPT`, `CONDITIONAL`, `REJECT`, plus `SKIPPED` (informational flag) and `PENDING` / `INGESTING` (dashboard lifecycle). Results and logs written by older versions (`PASS`, `PASS_WITH_WARNING`, `FAIL_CRITICAL`) are converted when read.
+Flags and series use one vocabulary, defined in `backend/status.py`: `ACCEPT`, `CONDITIONAL`, `REJECT`, plus `INFO` (reported value, never escalates) and `SKIPPED` (check not applicable) on flags, and `PENDING` / `INGESTING` (dashboard lifecycle). Results and logs written by older versions (`PASS`, `PASS_WITH_WARNING`, `FAIL_CRITICAL`) are converted when read, and those names are still accepted as API filter values.
+
+Every check emits one flag per series, every time. Only `CONDITIONAL` and `REJECT` escalate the series verdict, and only results that contain them are written to the problem log (`logs/`); a result re-analysed without them is removed from it.

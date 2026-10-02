@@ -48,6 +48,10 @@ def test_implant_auditor_rules_refined():
     surface_flags = [f for f in flags if "SURFACE_METAL" in f.message]
     external_flags = [f for f in flags if "EXTERNAL_METAL" in f.message]
 
+    # All three volumes are below their class limits (2 / 10 / 5 cc): INFO, reported with value and limit
+    assert {f.status for f in internal_flags + surface_flags + external_flags} == {"INFO"}
+    assert "0.50 cc, limit 2 cc" in internal_flags[0].message
+
     assert len(internal_flags) == 1
     assert "detected deep inside body" in internal_flags[0].message
     assert "Slice 1" in internal_flags[0].message
@@ -71,9 +75,21 @@ def test_implant_auditor_rules_refined():
     flags = engine._evaluate_rules(metrics_low)
 
     implant_flags = [f for f in flags if f.name == "ImplantAuditor"]
-    assert len(implant_flags) == 0
+    assert len(implant_flags) == 3  # one flag per class, every time
+    assert all(f.status == "INFO" for f in implant_flags)
 
     print("Test Case 2 (Below Threshold) Passed")
+
+    # Test Case 3: At/above each class limit -> CONDITIONAL
+    metrics_high = dict(metrics, metal_internal_cc=2.0, metal_surface_cc=10.0, metal_external_cc=5.0)
+    implant_flags = [f for f in engine._evaluate_rules(metrics_high) if f.name == "ImplantAuditor"]
+    assert [f.status for f in implant_flags] == ["CONDITIONAL"] * 3
+    assert "Verify implant/cardiac device safety." in implant_flags[0].message
+
+    # Test Case 4: No metal -> ACCEPT
+    metrics_none = dict(metrics, metal_internal_cc=0.0, metal_surface_cc=0.0, metal_external_cc=0.0)
+    implant_flags = [f for f in engine._evaluate_rules(metrics_none) if f.name == "ImplantAuditor"]
+    assert [f.status for f in implant_flags] == ["ACCEPT"] * 3
 
 if __name__ == "__main__":
     try:

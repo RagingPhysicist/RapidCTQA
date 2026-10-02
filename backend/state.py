@@ -16,8 +16,8 @@ import pydicom
 
 from backend import settings
 from backend.dicom_sender import send_dicom_series
-from backend.engine import QAEngine, CT_IMAGE_STORAGE
-from backend.fourdct import FourDCTGroup
+from backend.engine import CT_IMAGE_STORAGE, DISABLE_TOTALSEGMENTATOR_ENV, QAEngine
+from backend.fourdct import FourDCTGroup, detect_fourdct_groups
 from backend.listener import DicomListener
 from backend.logger import log_qa_result
 from backend.models import QAResult
@@ -41,10 +41,13 @@ analysis_pool = ThreadPoolExecutor(max_workers=4)
 
 segmentation_service = SegmentationService(storage_dir=settings.STORAGE_DIR)
 
+# RAPIDCTQA_DISABLE_TOTALSEGMENTATOR=1 keeps QA analysis on the rule-based
+# body mask (development / testing); manual segmentation from the UI still works.
+_qa_uses_totalsegmentator = os.environ.get(DISABLE_TOTALSEGMENTATOR_ENV) != "1"
 engine = QAEngine(
     settings.QA_CONFIG_PATH,
     storage_dir=settings.STORAGE_DIR,
-    segmentation_service=segmentation_service,
+    segmentation_service=segmentation_service if _qa_uses_totalsegmentator else None,
 )
 
 
@@ -103,14 +106,19 @@ def on_series_received(series_uid: str):
         results_cache[series_uid] = result
         # The file list may have grown since the viewer last cached it
         ct_files_cache.pop(series_uid, None)
+
+    # 4DCT: metal is evaluated once per group. Applying the group policy here
+    # (before logging and export) also updates sibling phases.
+    try:
+        groups, _ = detect_fourdct_groups({uid: storage_path(uid) for uid in list_series_dirs()})
+        apply_group_metal_policy(groups)
+    except Exception as e:
+        print(f"Error applying 4DCT metal policy for {series_uid}: {e}")
+    with results_cache_lock:
+        result = results_cache[series_uid]
     print(f"Analysis complete for {series_uid}: {result.status}")
 
-    cache_file = os.path.join(study_path, "qa_result.json")
-    try:
-        with open(cache_file, "w", encoding="utf-8") as f:
-            f.write(result.model_dump_json())
-    except Exception as e:
-        print(f"Error saving cached result to disk: {e}")
+    _persist_result(series_uid, result)
 
     try:
         log_qa_result(result, patient_id=read_patient_id(dicom_files))
@@ -128,6 +136,46 @@ def on_series_received(series_uid: str):
         shutil.copytree(study_path, export_path(series_uid), dirs_exist_ok=True)
         print(f"Auto-routing accepted series {series_uid} to DICOM destinations...")
         send_dicom_series(study_path)
+
+
+def _persist_result(series_uid: str, result: QAResult):
+    try:
+        with open(os.path.join(storage_path(series_uid), "qa_result.json"), "w", encoding="utf-8") as f:
+            f.write(result.model_dump_json())
+    except Exception as e:
+        print(f"Error saving cached result to disk: {e}")
+
+
+def apply_group_metal_policy(groups: List[FourDCTGroup]) -> List[str]:
+    """Evaluate metal once per 4DCT group: only the reference phase keeps its
+    ImplantAuditor flags, the other phases get one INFO flag pointing to it.
+
+    Changed results are updated in the cache, on disk, in the problem log and
+    in the PDF report. Returns the series UIDs that changed. Phases that were
+    already exported or reported keep that history; a phase that becomes
+    ACCEPT here is not auto-exported retroactively.
+    """
+    changed = []
+    for group in groups:
+        ref = group.reference_phase_uid or None
+        for phase in group.phases:
+            uid = phase.series_uid
+            with results_cache_lock:
+                current = results_cache.get(uid)
+                if current is None:
+                    continue
+                updated = engine.with_metal_policy(current, ref)
+                if updated == current:
+                    continue
+                results_cache[uid] = updated
+            changed.append(uid)
+            _persist_result(uid, updated)
+            try:
+                log_qa_result(updated, patient_id=read_patient_id(glob.glob(os.path.join(storage_path(uid), "*.dcm"))))
+                generate_pdf_report(updated, report_path(uid))
+            except Exception as e:
+                print(f"Error updating log/report for 4DCT phase {uid}: {e}")
+    return changed
 
 
 def submit_series(series_uid: str):

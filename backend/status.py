@@ -6,6 +6,8 @@ Verdicts (per flag and per series):
     REJECT       - series must not be used (rescan / resend)
 
 Informational / lifecycle values:
+    INFO         - finding reported with its measured value, not actionable
+                   (flag level only, never affects the verdict)
     SKIPPED      - check not applicable (flag level only, never affects the verdict)
     PENDING      - series received but not analysed yet (dashboard only)
     INGESTING    - series still arriving over DICOM (dashboard only)
@@ -22,6 +24,7 @@ class QAStatus(str, Enum):
     ACCEPT = "ACCEPT"
     CONDITIONAL = "CONDITIONAL"
     REJECT = "REJECT"
+    INFO = "INFO"
     SKIPPED = "SKIPPED"
     PENDING = "PENDING"
     INGESTING = "INGESTING"
@@ -41,11 +44,20 @@ LEGACY_ALIASES = {
 SEVERITY = {
     QAStatus.REJECT: 0,
     QAStatus.CONDITIONAL: 1,
-    QAStatus.ACCEPT: 2,
-    QAStatus.SKIPPED: 3,
-    QAStatus.PENDING: 4,
-    QAStatus.INGESTING: 5,
+    QAStatus.INFO: 2,
+    QAStatus.ACCEPT: 3,
+    QAStatus.SKIPPED: 4,
+    QAStatus.PENDING: 5,
+    QAStatus.INGESTING: 6,
 }
+
+# Flag statuses that need a clinician's attention. Only these escalate the
+# series verdict and only results containing them go to the problem log.
+ACTIONABLE = frozenset({QAStatus.REJECT, QAStatus.CONDITIONAL})
+
+
+def is_actionable(value) -> bool:
+    return try_normalize_status(value) in ACTIONABLE
 
 
 def normalize_status(value) -> QAStatus:
@@ -86,7 +98,7 @@ def series_verdict(flag_statuses: Iterable) -> QAStatus:
     """Overall series verdict from its flag statuses.
 
     REJECT if any flag rejects, otherwise CONDITIONAL if any flag needs
-    review, otherwise ACCEPT. SKIPPED flags never influence the verdict.
+    review, otherwise ACCEPT. INFO and SKIPPED flags never influence it.
     """
     statuses = {normalize_status(s) for s in flag_statuses}
     if QAStatus.REJECT in statuses:

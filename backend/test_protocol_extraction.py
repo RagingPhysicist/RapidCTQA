@@ -16,11 +16,8 @@ class TestProtocolExtraction(unittest.TestCase):
 thresholds:
   implants:
     metal_threshold_hu: 2000
-    max_volume_cc: 0.05
   alignment:
     hu_floor: -300
-    angular_step_deg: 0.1
-    max_allowable_tilt_deg: 1.5
 """)
         self.engine = QAEngine(self.config_path)
         self.test_dir = "test_data_protocol"

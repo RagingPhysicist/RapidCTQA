@@ -247,7 +247,7 @@ class ClinicalTriageApp(ctk.CTk):
             
             for flag in result.flags:
                 status = try_normalize_status(flag.status)
-                color = "RED" if status == QAStatus.REJECT else "YELLOW" if status == QAStatus.CONDITIONAL else "GRAY" if status == QAStatus.SKIPPED else "GREEN"
+                color = "RED" if status == QAStatus.REJECT else "YELLOW" if status == QAStatus.CONDITIONAL else "BLUE" if status == QAStatus.INFO else "GRAY" if status == QAStatus.SKIPPED else "GREEN"
                 self.flag_box.insert("end", f"[{flag.status}] {flag.name}\n")
                 self.flag_box.insert("end", f" >> {flag.message}\n\n")
             

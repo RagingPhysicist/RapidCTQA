@@ -6,7 +6,7 @@ import threading
 from datetime import datetime
 from typing import List, Dict, Any, Optional
 
-from backend.status import try_normalize_status, QAStatus
+from backend.status import is_actionable, try_normalize_status
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # Daily logs contain patient names and IDs; logs/ is git-ignored.
@@ -25,9 +25,14 @@ def log_qa_result(
     result: Any,
     patient_id: str = "Unknown",
     timestamp: Optional[str] = None
-) -> Dict[str, Any]:
+) -> Optional[Dict[str, Any]]:
     """
-    Log a QA Result object into the daily log file.
+    Record a QA result in the problem log.
+
+    Only results with an actionable flag (CONDITIONAL / REJECT) are written,
+    with just those flags as issues. A result without one removes any earlier
+    record for the same series (for example after re-analysis or a 4DCT
+    metal downgrade). Returns the written record, or None.
     """
     if timestamp is None:
         ts_dt = datetime.now()
@@ -40,66 +45,70 @@ def log_qa_result(
         except Exception:
             date_str = datetime.now().strftime("%Y-%m-%d")
 
-    # Issues: every flag that is not ACCEPT
     flags_list = []
     issues = []
-    flags = getattr(result, "flags", [])
-    for f in flags:
+    for f in getattr(result, "flags", []):
         f_name = getattr(f, "name", str(f.get("name") if isinstance(f, dict) else ""))
         f_status = getattr(f, "status", str(f.get("status") if isinstance(f, dict) else ""))
         f_msg = getattr(f, "message", str(f.get("message") if isinstance(f, dict) else ""))
-        f_status = str(try_normalize_status(f_status) or f_status)
+        if not is_actionable(f_status):
+            continue
+        f_status = str(try_normalize_status(f_status))
         flags_list.append({"name": f_name, "status": f_status, "message": f_msg})
-        if f_status and f_status != QAStatus.ACCEPT:
-            issue_text = f"{f_name}: {f_msg}" if f_msg else f_name
-            issues.append(issue_text)
+        issues.append(f"{f_name}: {f_msg}" if f_msg else f_name)
 
     series_uid = getattr(result, "series_uid", "")
-    patient_name = getattr(result, "patient_name", "Unknown")
-    protocol = getattr(result, "protocol", "Unknown")
     status = str(try_normalize_status(getattr(result, "status", "")) or getattr(result, "status", "UNKNOWN"))
-    metrics = getattr(result, "metrics", {})
 
-    record = {
-        "timestamp": timestamp,
-        "date": date_str,
-        "series_uid": series_uid,
-        "patient_name": patient_name,
-        "patient_id": patient_id,
-        "protocol": protocol,
-        "status": status,
-        "flags": flags_list,
-        "metrics": metrics,
-        "issues": issues,
-    }
+    record = None
+    if flags_list:
+        record = {
+            "timestamp": timestamp,
+            "date": date_str,
+            "series_uid": series_uid,
+            "patient_name": getattr(result, "patient_name", "Unknown"),
+            "patient_id": patient_id,
+            "protocol": getattr(result, "protocol", "Unknown"),
+            "status": status,
+            "flags": flags_list,
+            "metrics": getattr(result, "metrics", {}),
+            "issues": issues,
+        }
 
-    log_file = get_daily_log_path(date_str)
-
+    target_file = get_daily_log_path(date_str)
     with _log_lock:
         os.makedirs(LOGS_DIR, exist_ok=True)
-        records = []
-        if os.path.exists(log_file):
-            try:
-                with open(log_file, "r", encoding="utf-8") as f:
-                    records = json.load(f)
-            except Exception:
-                records = []
-
-        # Update existing record for series_uid or append new one
-        updated = False
-        for i, r in enumerate(records):
-            if r.get("series_uid") == series_uid:
-                records[i] = record
-                updated = True
-                break
-
-        if not updated:
-            records.append(record)
-
-        with open(log_file, "w", encoding="utf-8") as f:
-            json.dump(records, f, indent=2, ensure_ascii=False)
-
+        # Drop earlier records of this series from every daily file, then
+        # (re)write it to the target day if it is still a problem.
+        for path in _daily_log_files() | {target_file}:
+            records = _read_records(path)
+            kept = [r for r in records if r.get("series_uid") != series_uid]
+            if path == target_file and record is not None:
+                kept.append(record)
+            if kept != records:
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump(kept, f, indent=2, ensure_ascii=False)
     return record
+
+
+def _daily_log_files() -> set:
+    if not os.path.isdir(LOGS_DIR):
+        return set()
+    return {
+        os.path.join(LOGS_DIR, name) for name in os.listdir(LOGS_DIR)
+        if name.startswith("qa_log_") and name.endswith(".json")
+    }
+
+
+def _read_records(path: str) -> List[Dict[str, Any]]:
+    if not os.path.exists(path):
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
 
 
 def get_all_logs() -> List[Dict[str, Any]]:

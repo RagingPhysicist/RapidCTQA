@@ -20,6 +20,7 @@ class SeriesContext:
     empty_slices: List[int]            # 1-indexed slices with no patient voxels
     thresholds: Thresholds
     used_totalsegmentator: bool = False  # body mask from TotalSegmentator, not the rule-based one
+    slice_spacing_mm: float = 0.0        # median z spacing (falls back to SliceThickness)
     study_desc: str = field(init=False)
     body_part: str = field(init=False)
 

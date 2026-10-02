@@ -1,6 +1,6 @@
 [project]
 name = "rapidctqa"
-version = "1.6.0"
+version = "1.7.0"
 description = "Pre-contour QA for radiotherapy planning CT series"
 requires-python = ">=3.10"
 

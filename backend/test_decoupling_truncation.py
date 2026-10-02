@@ -19,11 +19,8 @@ thresholds:
     max_gantry_tilt_deg: 1.0
   implants:
     metal_threshold_hu: 2000
-    max_volume_cc: 0.05
   alignment:
     hu_floor: -300
-    angular_step_deg: 0.1
-    max_allowable_tilt_deg: 1.5
 """)
         self.engine = QAEngine(self.config_path)
         self.test_dir = "test_data_decoupling"
@@ -106,14 +103,14 @@ thresholds:
         self.assertTrue(result.metrics["accessory_truncation_detected"], "Clipped couch must be flagged as accessory truncation")
         self.assertFalse(result.metrics["truncation_error"], "Patient body must NOT be flagged as truncated")
 
-        # 2. Verify GeometryGuardian flags CONDITIONAL
-        gg_flags = [f for f in result.flags if f.name == "GeometryGuardian" and f.status != "SKIPPED"]
-        self.assertEqual(len(gg_flags), 1)
-        self.assertEqual(gg_flags[0].status, "CONDITIONAL", "Clipped couch top must return CONDITIONAL")
-        self.assertIn("Accessory / Positioning Device Truncated at FOV Edge", gg_flags[0].message)
+        # 2. Accessory-only truncation is reported as INFO
+        fov_flag = [f for f in result.flags if f.name == "GeometryGuardian"][0]
+        self.assertEqual(fov_flag.status, "INFO", "Clipped couch top must be INFO")
+        self.assertIn("Accessory / Positioning Device Truncated at FOV Edge", fov_flag.message)
 
-        # 3. Verify overall series status is CONDITIONAL (not REJECT)
-        self.assertEqual(result.status, "CONDITIONAL", "Overall status must be CONDITIONAL instead of hard failure")
+        # 3. INFO never escalates: no truncation-related review or reject
+        self.assertNotEqual(result.status, "REJECT")
+        self.assertFalse(any("Truncat" in f.message and f.status in ("CONDITIONAL", "REJECT") for f in result.flags))
 
     def test_critical_patient_body_truncation_fails_critically(self):
         """
@@ -145,12 +142,11 @@ thresholds:
 
     def test_flared_wingboard_elbow_clipping_suppression(self):
         """
-        Task 3 Rule Matrix:
-        Flared wingboard elbow clipping in Thorax/Breast:
-        - depth < 15 mm -> CONDITIONAL
-        - depth >= 15 mm -> REJECT
+        An elbow / arm that lies separately from the torso and touches the
+        lateral FOV edge is not patient truncation: it is INFO regardless of
+        depth (previously CONDITIONAL below 15 mm, REJECT above).
         """
-        # Case A: Depth = 10 mm (< 15 mm) on Thorax scan -> CONDITIONAL
+        # Case A: Depth = 10 mm on Thorax scan -> INFO
         paths_tol = self.create_ct_series(protocol="Thorax Lung Scan", study_desc="Chest Thorax", num_slices=5)
         for i, path in enumerate(paths_tol):
             ds = pydicom.dcmread(path)
@@ -166,12 +162,12 @@ thresholds:
 
         result_tol = self.engine.analyze_series(paths_tol)
         self.assertFalse(result_tol.metrics["truncation_error"])
-        self.assertIn(3, result_tol.metrics["tolerated_truncated_slices"])
-        gg_flags_tol = [f for f in result_tol.flags if f.name == "GeometryGuardian" and f.status == "CONDITIONAL"]
-        self.assertEqual(len(gg_flags_tol), 1)
-        self.assertIn("Flared wingboard elbow clipping within clinical tolerance (<15mm)", gg_flags_tol[0].message)
+        self.assertIn(3, result_tol.metrics["accessory_truncated_slices"] + result_tol.metrics["tolerated_truncated_slices"])
+        fov_flag = [f for f in result_tol.flags if f.name == "GeometryGuardian"][0]
+        self.assertEqual(fov_flag.status, "INFO")
+        self.assertIn("Slice 3", fov_flag.message)
 
-        # Case B: Depth = 20 mm (>= 15 mm) on Thorax scan -> REJECT
+        # Case B: Depth = 20 mm on Thorax scan -> still INFO
         paths_crit = self.create_ct_series(protocol="Thorax Lung Scan", study_desc="Chest Thorax", num_slices=5)
         for i, path in enumerate(paths_crit):
             ds = pydicom.dcmread(path)
@@ -184,13 +180,13 @@ thresholds:
             ds.save_as(path, enforce_file_format=True)
 
         result_crit = self.engine.analyze_series(paths_crit)
-        self.assertTrue(result_crit.metrics["truncation_error"])
-        self.assertEqual(result_crit.status, "REJECT")
+        self.assertFalse(result_crit.metrics["truncation_error"])
+        self.assertEqual([f for f in result_crit.flags if f.name == "GeometryGuardian"][0].status, "INFO")
 
     def test_empty_air_slices_above_and_below_skipped(self):
         """
         Task 3 Rule Matrix:
-        Empty air slices above head / below feet -> SKIPPED (EMPTY_SLICE)
+        Empty air slices above head / below feet -> INFO (EMPTY_SLICE)
         """
         paths = self.create_ct_series(protocol="H&N Brain", study_desc="Head Neck", num_slices=5)
         # Slices 0 and 4 are ambient air (-1000 HU)
@@ -208,23 +204,24 @@ thresholds:
         self.assertIn(5, result.metrics["empty_slices"])
         self.assertFalse(result.metrics["truncation_error"])
 
-        empty_flags = [f for f in result.flags if f.name == "GeometryGuardian" and f.status == "SKIPPED"]
+        empty_flags = [f for f in result.flags if f.name == "GeometryGuardian" and "EMPTY_SLICE" in f.message]
         self.assertEqual(len(empty_flags), 1)
-        self.assertIn("EMPTY_SLICE: Over-range air slices bypassed", empty_flags[0].message)
+        self.assertEqual(empty_flags[0].status, "INFO")
+        self.assertIn("over-range air slice(s) bypassed", empty_flags[0].message)
         self.assertIn("Slices 1, 5", empty_flags[0].message)
 
     def test_pelvic_rectal_gas_volume_under_15cc_passes(self):
         """
         Task 3 Rule Matrix:
-        Pelvic Rectal Gas Volume < 15 cm3 -> PASS (Normal physiological variance)
+        Pelvic Rectal Gas Volume below the INFO limit -> INFO with the measured value
         """
         paths = self.create_ct_series(protocol="Pelvis Prostate", study_desc="Prostate Study", num_slices=10, pixel_spacing=[1.5, 1.5])
         for path in paths:
             ds = pydicom.dcmread(path)
             pixels = np.frombuffer(ds.PixelData, dtype=np.uint16).copy().reshape((128, 128))
             y, x = np.ogrid[:128, :128]
-            # Patient body
-            pixels[(x - 64)**2 + (y - 64)**2 <= 30**2] = 924
+            # Patient body (large enough that the pocket passes the body-mask sanity check)
+            pixels[(x - 64)**2 + (y - 64)**2 <= 45**2] = 924
             # Small gas pocket (radius 10 -> ~7 cc across lower 5 slices)
             pixels[(x - 64)**2 + (y - 64)**2 <= 10**2] = 24  # Air cavity
             ds.PixelData = pixels.tobytes()
@@ -235,10 +232,11 @@ thresholds:
         self.assertGreater(gas_cc, 0.0)
         self.assertLessEqual(gas_cc, 15.0)
 
-        cavity_flags = [f for f in result.flags if f.name == "CavityScout"]
-        self.assertEqual(len(cavity_flags), 1)
-        self.assertEqual(cavity_flags[0].status, "ACCEPT", "Gas < 15 cc must return ACCEPT")
-        self.assertIn("within physiological limits", cavity_flags[0].message)
+        gas_flags = [f for f in result.flags if f.name == "CavityScout" and "gas volume" in f.message.lower()]
+        self.assertEqual(len(gas_flags), 1)
+        self.assertEqual(gas_flags[0].status, "INFO", "Small gas volume must be INFO")
+        self.assertIn("within physiological limits", gas_flags[0].message)
+        self.assertIn(f"{gas_cc:.1f} cc", gas_flags[0].message)
 
     def test_three_stage_anatomical_decoupling_masks(self):
         """

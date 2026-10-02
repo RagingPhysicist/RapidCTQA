@@ -69,13 +69,32 @@ def evaluate(metrics: Dict[str, Any], t: Thresholds) -> List[QAFlag]:
     flags = []
     if metrics["pediatric_mismatch"]:
         flags.append(QAFlag(name=NAME, status=QAStatus.REJECT, message=metrics["pediatric_mismatch_message"]))
+    else:
+        flags.append(QAFlag(name=NAME, status=QAStatus.ACCEPT, message="Paediatric/adult protocol markers consistent"))
 
-    if metrics["slice_count"] < t.integrity.min_slice_count:
-        flags.append(QAFlag(name=NAME, status=QAStatus.REJECT, message=f"Insufficient slices for clinical series (Found: {metrics['slice_count']})"))
+    count, min_count = metrics["slice_count"], t.integrity.min_slice_count
+    flags.append(QAFlag(
+        name=NAME,
+        status=QAStatus.REJECT if count < min_count else QAStatus.ACCEPT,
+        message=(f"Insufficient slices for clinical series (Found: {count}, minimum {min_count})"
+                 if count < min_count else f"Slice count {count} (minimum {min_count})")))
 
-    thick = t.slice_thickness
-    if metrics["slice_thickness"] > thick.absolute_max_mm:
-        flags.append(QAFlag(name=NAME, status=QAStatus.REJECT, message=f"Slice thickness exceeds clinical absolute limit ({thick.absolute_max_mm:g}mm)"))
-    elif metrics["slice_thickness"] > thick.preferred_max_mm:
-        flags.append(QAFlag(name=NAME, status=QAStatus.CONDITIONAL, message=f"Slice thickness exceeds preferred limit ({thick.preferred_max_mm:g}mm)"))
+    flags.append(_thickness_flag(metrics["slice_thickness"], t))
     return flags
+
+
+def _thickness_flag(measured: float, t: Thresholds) -> QAFlag:
+    """REJECT above the absolute limit; otherwise only deviation from the protocol's nominal is flagged."""
+    cfg = t.slice_thickness
+    if measured > cfg.absolute_max_mm:
+        return QAFlag(name=NAME, status=QAStatus.REJECT, message=(
+            f"Slice thickness {measured:g} mm exceeds clinical absolute limit ({cfg.absolute_max_mm:g}mm)"))
+    if cfg.nominal_mm is None:
+        return QAFlag(name=NAME, status=QAStatus.ACCEPT, message=(
+            f"Slice thickness {measured:g} mm (absolute limit {cfg.absolute_max_mm:g} mm; no nominal set for protocol)"))
+    deviation = measured - cfg.nominal_mm
+    expected = f"nominal {cfg.nominal_mm:g} ± {cfg.tolerance_mm:g} mm"
+    if abs(deviation) > cfg.tolerance_mm:
+        return QAFlag(name=NAME, status=QAStatus.CONDITIONAL, message=(
+            f"Slice thickness {measured:g} mm deviates from protocol ({expected})"))
+    return QAFlag(name=NAME, status=QAStatus.ACCEPT, message=f"Slice thickness {measured:g} mm ({expected})")

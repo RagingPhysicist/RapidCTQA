@@ -39,20 +39,26 @@ def compute(ctx: SeriesContext) -> Dict[str, Any]:
 
 def evaluate(metrics: Dict[str, Any], t: Thresholds) -> List[QAFlag]:
     flags = []
+    lo, hi = t.fluid.optimal_range_hu
+    cond_max = t.fluid.conditional_max_hu
     # IV contrast raises fluid density, so the calibration check does not apply.
-    # Otherwise only evaluate when fluid-range pixels exist in the scan.
     if metrics.get("has_contrast", False):
         flags.append(QAFlag(name=NAME, status=QAStatus.SKIPPED, message="IV Contrast detected: Fluid HU calibration skipped"))
-    elif metrics.get("fluid_pixels_found", False):
-        lo, hi = t.fluid.optimal_range_hu
+    elif not metrics.get("fluid_pixels_found", False):
+        flags.append(QAFlag(name=NAME, status=QAStatus.SKIPPED, message="Fluid HU calibration skipped: no fluid-range voxels in body"))
+    else:
         value = metrics["fluid_median_hu"]
+        limits = f"(optimal {lo:g} to {hi:g} HU, review up to {cond_max:g} HU)"
         if lo <= value <= hi:
-            pass  # Optimal
-        elif hi < value <= t.fluid.conditional_max_hu:
-            flags.append(QAFlag(name=NAME, status=QAStatus.CONDITIONAL, message=f"Fluid density variance ({value:.1f} HU)"))
+            flags.append(QAFlag(name=NAME, status=QAStatus.ACCEPT, message=f"Fluid density {value:.1f} HU {limits}"))
+        elif hi < value <= cond_max:
+            flags.append(QAFlag(name=NAME, status=QAStatus.CONDITIONAL, message=f"Fluid density variance {value:.1f} HU {limits}"))
         else:
-            flags.append(QAFlag(name=NAME, status=QAStatus.REJECT, message=f"HU Consistency failure ({value:.1f} HU)"))
+            flags.append(QAFlag(name=NAME, status=QAStatus.REJECT, message=f"HU Consistency failure: fluid {value:.1f} HU {limits}"))
 
-    if metrics["rescale_slope"] == 0:
-        flags.append(QAFlag(name=NAME, status=QAStatus.REJECT, message="Invalid RescaleSlope (0)"))
+    slope = metrics["rescale_slope"]
+    flags.append(QAFlag(
+        name=NAME,
+        status=QAStatus.REJECT if slope == 0 else QAStatus.ACCEPT,
+        message="Invalid RescaleSlope (0)" if slope == 0 else f"RescaleSlope {float(slope):g}"))
     return flags

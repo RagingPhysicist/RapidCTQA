@@ -9,7 +9,7 @@ from typing import Any, Dict, List
 import numpy as np
 import scipy.ndimage as ndimage
 
-from backend.agents.base import SeriesContext, format_slices
+from backend.agents.base import SeriesContext, format_slices, mentions_any
 from backend.models import QAFlag
 from backend.qa_config import Thresholds
 from backend.status import QAStatus
@@ -73,8 +73,9 @@ def compute(ctx: SeriesContext) -> Dict[str, Any]:
     metal_internal_cc = float(np.sum(metal_internal) * voxel_vol)
     metal_surface_cc = float(np.sum(metal_surface) * voxel_vol)
     metal_external_cc = float(np.sum(metal_external) * voxel_vol)
-    limit = cfg.max_volume_cc
-    metal_detected = (metal_internal_cc > limit or metal_surface_cc > limit or metal_external_cc > limit)
+    metal_detected = (metal_internal_cc >= cfg.internal_info_max_cc
+                      or metal_surface_cc >= cfg.surface_info_max_cc
+                      or metal_external_cc >= cfg.external_info_max_cc)
 
     def slices_with(mask):
         return [i + 1 for i in range(mask.shape[0]) if np.any(mask[i])]
@@ -92,21 +93,42 @@ def compute(ctx: SeriesContext) -> Dict[str, Any]:
         "metal_external_slices": slices_with(metal_external) if has_metal else [],
         "marker_detected": len(marker_slices) > 0,
         "marker_slices": marker_slices,
+        "is_pelvis_scan": mentions_any(cfg.pelvis_keywords, ctx.protocol, ctx.study_desc, ctx.body_part),
     }
 
 
+# (class, metrics key, label, advice, config attribute of the INFO limit)
+_CLASSES = (
+    ("internal", "INTERNAL_METAL", "deep inside body", "Verify implant/cardiac device safety.", "internal_info_max_cc"),
+    ("surface", "SURFACE_METAL", "on patient skin/surface", "Verify if markers or external objects.", "surface_info_max_cc"),
+    ("external", "EXTERNAL_METAL", "outside body", "Verify no external objects are present.", "external_info_max_cc"),
+)
+
+
 def evaluate(metrics: Dict[str, Any], t: Thresholds) -> List[QAFlag]:
-    limit = t.implants.max_volume_cc
+    """One flag per metal class: none -> ACCEPT, below the class limit -> INFO, at/above -> CONDITIONAL.
+
+    Pelvis scans: internal metal at/above ``pelvis_internal_conditional_cc``
+    is CONDITIONAL even if a protocol override raised the internal limit.
+    """
+    cfg = t.implants
     flags = []
-    if metrics.get("metal_internal_cc", 0) > limit:
-        slice_info = format_slices(metrics.get("metal_internal_slices", []))
-        flags.append(QAFlag(name=NAME, status=QAStatus.CONDITIONAL, message=f"INTERNAL_METAL: High-density metal detected deep inside body ({metrics['metal_internal_cc']:.2f} cc){slice_info}. Verify implant/cardiac device safety."))
+    for cls, code, where, advice, limit_attr in _CLASSES:
+        volume = metrics.get(f"metal_{cls}_cc", 0.0)
+        limit = getattr(cfg, limit_attr)
+        slice_info = format_slices(metrics.get(f"metal_{cls}_slices", []))
+        if volume <= 0:
+            flags.append(QAFlag(name=NAME, status=QAStatus.ACCEPT, message=f"{code}: none detected (>{cfg.metal_threshold_hu:g} HU)"))
+            continue
 
-    if metrics.get("metal_surface_cc", 0) > limit:
-        slice_info = format_slices(metrics.get("metal_surface_slices", []))
-        flags.append(QAFlag(name=NAME, status=QAStatus.CONDITIONAL, message=f"SURFACE_METAL: High-density metal detected on patient skin/surface ({metrics['metal_surface_cc']:.2f} cc){slice_info}. Verify if markers or external objects."))
-
-    if metrics.get("metal_external_cc", 0) > limit:
-        slice_info = format_slices(metrics.get("metal_external_slices", []))
-        flags.append(QAFlag(name=NAME, status=QAStatus.CONDITIONAL, message=f"EXTERNAL_METAL: High-density metal detected outside body ({metrics['metal_external_cc']:.2f} cc){slice_info}. Verify no external objects are present."))
+        conditional = volume >= limit
+        limit_txt = f"limit {limit:g} cc"
+        if cls == "internal" and metrics.get("is_pelvis_scan") and volume >= cfg.pelvis_internal_conditional_cc:
+            conditional = True
+            limit_txt += f", pelvis limit {cfg.pelvis_internal_conditional_cc:g} cc"
+        message = f"{code}: High-density metal detected {where} ({volume:.2f} cc, {limit_txt}){slice_info}."
+        flags.append(QAFlag(
+            name=NAME,
+            status=QAStatus.CONDITIONAL if conditional else QAStatus.INFO,
+            message=f"{message} {advice}" if conditional else message))
     return flags
