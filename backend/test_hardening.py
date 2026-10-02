@@ -39,15 +39,16 @@ def test_invalid_ctqa_yaml_fails_loudly(tmp_path, yaml_text):
 def test_thresholds_from_yaml_drive_the_rules(tmp_path):
     from backend.engine import QAEngine
     path = tmp_path / "ctqa.yaml"
-    path.write_text("thresholds:\n  gas:\n    conditional_cc: 5\n    reject_cc: 8\n    leak_cc: 100\n")
+    path.write_text("thresholds:\n  gas:\n    info_max_cc: 2\n    large_cc: 5\n    reject_cc: 8\n")
     engine = QAEngine(str(path))
     flags = engine._evaluate_rules({
         "is_pelvis_or_abdomen_scan": True, "gas_volume_cc": 10.0, "gas_slices": [2, 3],
         "slice_spacing_var": 0.0, "monotonic_z": True, "gantry_tilt": 0.0, "duplicate_slices": False,
         "background_air_sd": 5.0, "air_hu_estimate": -1000.0, "rescale_slope": 1.0,
-        "radon_status": "SKIPPED", "pediatric_mismatch": False, "slice_count": 10, "slice_thickness": 2.0,
+        "pediatric_mismatch": False, "slice_count": 10, "slice_thickness": 2.0,
+        "gas_body_fraction": 0.01, "body_mask_sane": True,
     })
-    gas = [f for f in flags if f.name == "CavityScout"]
+    gas = [f for f in flags if f.name == "CavityScout" and "gas volume" in f.message.lower()]
     assert gas[0].status == QAStatus.REJECT
     assert "Slices 2-3" in gas[0].message
 
@@ -80,7 +81,8 @@ def test_series_verdict_ignores_skipped():
 
 def test_log_filter_matches_legacy_records():
     from backend.logger import log_qa_result
-    log_qa_result(QAResult(series_uid="1.9.9.1", status="FAIL_CRITICAL", metrics={}, flags=[]))
+    log_qa_result(QAResult(series_uid="1.9.9.1", status="FAIL_CRITICAL", metrics={},
+                           flags=[QAFlag(name="X", status="FAIL_CRITICAL", message="legacy")]))
     assert any(r["series_uid"] == "1.9.9.1" for r in query_logs(status="REJECT"))
     assert any(r["series_uid"] == "1.9.9.1" for r in query_logs(status="FAIL_CRITICAL"))
     assert not any(r["series_uid"] == "1.9.9.1" for r in query_logs(status="ACCEPT"))
@@ -211,7 +213,7 @@ _FLUID_BASE = {
 
 
 @pytest.mark.parametrize("median,contrast,expected", [
-    (38.0, False, None),            # inside 0..40
+    (38.0, False, "ACCEPT"),        # inside 0..40
     (45.0, False, "CONDITIONAL"),   # 40..50
     (55.0, False, "REJECT"),
     (55.0, True, "SKIPPED"),        # IV contrast: check skipped
@@ -220,5 +222,5 @@ def test_fluid_limits_and_contrast_skip(median, contrast, expected):
     from backend.engine import QAEngine
     engine = QAEngine(settings.QA_CONFIG_PATH)
     flags = engine._evaluate_rules(dict(_FLUID_BASE, fluid_median_hu=median, has_contrast=contrast))
-    fluid = [f.status for f in flags if f.name == "FluidPhysicist"]
-    assert fluid == ([expected] if expected else [])
+    fluid = [f.status for f in flags if f.name == "FluidPhysicist" and "RescaleSlope" not in f.message]
+    assert fluid == [expected]

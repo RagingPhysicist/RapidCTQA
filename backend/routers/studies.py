@@ -125,6 +125,8 @@ async def get_studies(background_tasks: BackgroundTasks) -> List[Any]:
         )
 
     groups, plain_uids = detect_fourdct_groups(series_dirs)
+    # Phases analysed before their group was complete get the group metal policy now
+    state.apply_group_metal_policy(groups)
     with state.fourdct_cache_lock:
         state.fourdct_cache.clear()
         for g in groups:

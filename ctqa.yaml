@@ -4,16 +4,20 @@
 # validates it at startup). Unknown or misspelled keys stop the application
 # from starting, so an edit here either takes effect or fails loudly.
 #
-# The checks themselves (which metric is compared against which limit, and
-# whether a breach is CONDITIONAL or REJECT) are implemented per agent in
-# backend/agents/*.py and documented in docs/AGENTS_DETAIL.md.
-#
+# Every check reports one flag per series, with the measured value and the
+# limit: ACCEPT, INFO (reported, not actionable), CONDITIONAL (clinician
+# review) or REJECT. SKIPPED means the check does not apply.
 # Series verdict: REJECT if any flag rejects, otherwise CONDITIONAL if any
-# flag needs review, otherwise ACCEPT. Only ACCEPT series are auto-exported.
+# flag needs review, otherwise ACCEPT. INFO never escalates. Only ACCEPT
+# series are auto-exported, and only CONDITIONAL/REJECT results are written
+# to the problem log.
+#
+# The checks themselves are implemented per agent in backend/agents/*.py and
+# documented in docs/AGENTS_DETAIL.md.
 
 sop:
   id: RT-CT-PRECONTOUR-QA
-  version: 1.4
+  version: 1.5
   description: >
     Pre-contouring QA for radiotherapy CT datasets.
 
@@ -21,19 +25,16 @@ thresholds:
 
   geometry:                               # GeometryGuardian
     edge_buffer_px: 3                     # FOV border ring checked for body/accessory contact
-    min_edge_pixels: 5                    # fewer border pixels than this is ignored as noise
-    lateral_tolerance_mm:                 # tolerated lateral (left/right) body clipping depth
-      lenient: 15.0                       #   protocols matching lenient_protocol_keywords
-      head_neck: 5.0                      #   protocols/studies matching head_neck_keywords
-      default: 0.0                        #   everything else (pelvis, prostate, ...)
-    accessory_lateral_tolerance_mm: 15.0  # lenient protocols: deeper accessory clipping -> REJECT
-    lenient_protocol_keywords: [THORAX, CHEST, BREAST]
-    head_neck_keywords: [head, neck, brain, c-spine, cspine, cervical]
+    min_edge_pixels: 5                    # fewer contact pixels on a slice are ignored as noise
+    torso_core_opening_mm: 30             # opening that separates arms/elbows from the torso core
+    max_lateral_truncation_z_mm: 12       # lateral torso contact: up to this z-extent CONDITIONAL, longer REJECT
+                                          # (anterior/posterior contact is always REJECT)
     max_slice_spacing_variation_mm: 1.0   # REJECT above
     max_gantry_tilt_deg: 1.0              # CONDITIONAL above
 
   slice_thickness:                        # Integrity
-    preferred_max_mm: 3.0                 # CONDITIONAL above
+    nominal_mm: null                      # expected thickness; set per protocol below (null = no nominal check)
+    tolerance_mm: 0.5                     # |measured - nominal| above this -> CONDITIONAL
     absolute_max_mm: 5.0                  # REJECT above
 
   integrity:
@@ -47,28 +48,55 @@ thresholds:
   hu:
     air_range: [-1100, -900]              # 1st-percentile air estimate outside -> REJECT
 
-  fluid:                                  # FluidPhysicist (skipped when ContrastBolusAgent is set)
+  fluid:                                  # FluidPhysicist (SKIPPED when ContrastBolusAgent is set)
     search_range_hu: [0, 30]              # body voxels whose median is the fluid estimate ...
     fallback_search_range_hu: [0, 50]     # ... or this range if none fall in search_range_hu
     optimal_range_hu: [0, 40]
     conditional_max_hu: 50                # above optimal up to this -> CONDITIONAL, beyond -> REJECT
 
   gas:                                    # CavityScout (pelvis/abdomen scans, inferior half of the series)
-    conditional_cc: 15                    # CONDITIONAL above
-    reject_cc: 50                         # REJECT above
-    leak_cc: 100                          # REJECT as SEGMENTATION_LEAK above
+    info_max_cc: 30                       # below: INFO
+    large_cc: 75                          # 30..75 cc "moderate", above "large"; both CONDITIONAL
+    reject_cc: 150                        # REJECT above (null = never; abdomen override below)
+    max_gas_body_fraction: 0.10           # body-mask sanity: more gas than this share of the body -> CONDITIONAL, gas value unreliable
     couch_exclusion_mm: 15                # ignore gas this close to the posterior skin/couch interface
     pelvis_keywords: [PELVIS, PROSTATE, ABD, ABDOMEN, RECTUM, GYN, PELVIC]
 
-  implants:                               # ImplantAuditor
+  implants:                               # ImplantAuditor (per class: none ACCEPT, below limit INFO, at/above CONDITIONAL)
     metal_threshold_hu: 3000              # voxels above this are metal (also used for the viewer overlay)
-    max_volume_cc: 0.2                    # CONDITIONAL when internal, surface or external metal exceeds this
+    internal_info_max_cc: 2
+    surface_info_max_cc: 10
+    external_info_max_cc: 5
+    pelvis_internal_conditional_cc: 5     # pelvis scans: internal metal at/above is always CONDITIONAL
+    pelvis_keywords: [PELVIS, PROSTATE, RECTUM, GYN, PELVIC, BLADDER]
     internal_margin_mm: 10                # body erosion margin separating internal from surface metal
     marker_max_volume_cc: 0.1             # per-component volume below which a 3-point pattern counts as set-up markers
 
-  alignment:                              # AlignmentAuditor
-    max_allowable_tilt_deg: 1.5           # CONDITIONAL (ROLL_ALERT) above ...
-    min_confidence: 0.95                  # ... when the symmetry confidence is above this
-    symmetry_gate: 0.90                   # below this the slice is unreadable and the check is SKIPPED
+  alignment:                              # AlignmentAuditor (central slice, mirror-symmetry estimate)
+    info_deg: 1.5                         # |roll| above: INFO
+    conditional_deg: 3.0                  # |roll| above: CONDITIONAL (ROLL_ALERT)
+    min_correlation: 0.90                 # below: estimate unreliable (INFO, no alert)
+    search_range_deg: 30                  # mirror rotation search ±30° (= roll ±15°)
+    step_deg: 0.25
+    edge_margin_deg: 0.5                  # best angle within this of the search limit: unreliable
     hu_floor: -300
-    angular_step_deg: 0.1
+    hu_ceiling: 300
+    downsample: 4
+
+# Per-protocol overrides. Each entry whose "match" occurs in ProtocolName
+# (case-insensitive substring) is merged over the thresholds above, in order;
+# later entries win. Same keys and validation as "thresholds".
+protocol_overrides:
+
+  - match: ABD                            # bowel gas is expected in abdominal scans: never reject on volume
+    thresholds:
+      gas:
+        reject_cc: null
+
+  # Nominal slice thickness per protocol: set these to your scan protocols.
+  # - match: HEAD
+  #   thresholds:
+  #     slice_thickness: {nominal_mm: 2.0}
+  # - match: THORAX
+  #   thresholds:
+  #     slice_thickness: {nominal_mm: 3.0}

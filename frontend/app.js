@@ -24,7 +24,14 @@ function jsArg(value) {
   return esc(JSON.stringify(String(value ?? '')));
 }
 
-// Status values: ACCEPT, CONDITIONAL, REJECT, SKIPPED, PENDING, INGESTING.
+// Status values: ACCEPT, CONDITIONAL, REJECT, INFO, SKIPPED, PENDING, INGESTING.
+const FLAG_ORDER = { REJECT: 0, CONDITIONAL: 1, INFO: 2, ACCEPT: 3, SKIPPED: 4 };
+
+// Every check reports a flag; show actionable findings first.
+function sortFlags(flags) {
+  return [...(flags || [])].sort((a, b) => (FLAG_ORDER[a.status] ?? 9) - (FLAG_ORDER[b.status] ?? 9));
+}
+
 function statusKey(status) {
   return String(status || 'pending').toLowerCase().replace(/[^a-z]/g, '');
 }
@@ -268,7 +275,7 @@ async function viewStudy(seriesUid) {
 
     title.textContent = `QA Report: ${result.patient_name}`;
     
-    let flagsHtml = result.flags.map(flag => `
+    let flagsHtml = sortFlags(result.flags).map(flag => `
       <div class="flag-item">
         <div class="flag-icon" style="background: var(--${statusKey(flag.status)})"></div>
         <div>
@@ -294,7 +301,7 @@ async function viewStudy(seriesUid) {
           <p><strong>Bkg Air Noise:</strong> ${result.metrics.background_air_sd.toFixed(2)} HU</p>
           <p><strong>Fluid Density:</strong> ${result.metrics.fluid_median_hu.toFixed(1)} HU</p>
           <p><strong>Gas Volume:</strong> ${result.metrics.gas_volume_cc.toFixed(1)} cc</p>
-          <p><strong>Patient Roll:</strong> ${result.metrics.radon_roll_deg != null ? result.metrics.radon_roll_deg.toFixed(1) : '0.0'}°</p>
+          <p><strong>Patient Roll:</strong> ${result.metrics.roll_deg == null ? 'n/a' : (result.metrics.roll_reliable === false ? 'unreliable' : result.metrics.roll_deg.toFixed(1) + '°')}</p>
           <p><strong>Slices:</strong> ${esc(result.metrics.slice_count)}</p>
         </div>
         <div>
@@ -408,8 +415,8 @@ async function launchCockpit(seriesUid) {
     // Render QA flags
     const flagsEl = document.getElementById('cockpit-flags');
     if (info.flags && info.flags.length > 0) {
-      const colours = { REJECT: '#ef4444', CONDITIONAL: '#f59e0b', ACCEPT: '#10b981', SKIPPED: '#64748b' };
-      flagsEl.innerHTML = info.flags.map(f => {
+      const colours = { REJECT: '#ef4444', CONDITIONAL: '#f59e0b', INFO: '#3b82f6', ACCEPT: '#10b981', SKIPPED: '#64748b' };
+      flagsEl.innerHTML = sortFlags(info.flags).map(f => {
         // Detect slice indicators like "(Slice 5)" or "(Slices 10-15)"
         const match = f.message ? f.message.match(/\(Slices?\s+(\d+)/) : null;
         const clickable = match ? 'clickable' : '';

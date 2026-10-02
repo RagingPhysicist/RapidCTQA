@@ -40,11 +40,13 @@ def compute(ctx: SeriesContext) -> Dict[str, Any]:
 
 
 def evaluate(metrics: Dict[str, Any], t: Thresholds) -> List[QAFlag]:
-    flags = []
-    if metrics["background_air_sd"] > t.noise.max_background_air_sd_hu:
-        flags.append(QAFlag(name=NAME, status=QAStatus.CONDITIONAL, message=f"High background noise (SD: {metrics['background_air_sd']:.1f})"))
-
-    air_lo, air_hi = t.hu.air_range
-    if not (air_lo <= metrics["air_hu_estimate"] <= air_hi):
-        flags.append(QAFlag(name=NAME, status=QAStatus.REJECT, message=f"Air HU calibration error ({metrics['air_hu_estimate']:.1f})"))
-    return flags
+    sd, sd_limit = metrics["background_air_sd"], t.noise.max_background_air_sd_hu
+    air, (air_lo, air_hi) = metrics["air_hu_estimate"], t.hu.air_range
+    return [
+        QAFlag(name=NAME,
+               status=QAStatus.CONDITIONAL if sd > sd_limit else QAStatus.ACCEPT,
+               message=f"Background air noise SD {sd:.1f} HU (limit {sd_limit:g} HU)"),
+        QAFlag(name=NAME,
+               status=QAStatus.ACCEPT if air_lo <= air <= air_hi else QAStatus.REJECT,
+               message=f"Air HU calibration {air:.1f} HU (expected {air_lo:g} to {air_hi:g} HU)"),
+    ]

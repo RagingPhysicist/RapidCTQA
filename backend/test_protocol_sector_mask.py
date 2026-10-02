@@ -17,11 +17,8 @@ class TestProtocolSectorMask(unittest.TestCase):
 thresholds:
   implants:
     metal_threshold_hu: 2000
-    max_volume_cc: 0.05
   alignment:
     hu_floor: -300
-    angular_step_deg: 0.1
-    max_allowable_tilt_deg: 1.5
 """)
         self.engine = QAEngine(self.config_path)
         self.test_dir = "test_data_sector"
@@ -82,62 +79,28 @@ thresholds:
         pass
 
     def test_lateral_truncation_tolerances(self):
-        # Create a series with a simulated lateral truncation (left lateral edge) of 10 mm depth
-        # We set a block of size 5x10 pixels at the left edge to -100 HU (body pixel -> stored as 924)
-        # Left Lateral: row 62 to 66 (5 rows), col 0 to 9 (10 cols)
-        
-        # 1. Test Breast/Thorax protocol (15 mm tolerance) -> Should accept
-        paths_breast = self.create_ct_series(protocol="Breast Wingboard Scan", study_desc="Thorax Study")
-        # Load one slice, modify its pixels, save it back
-        ds = pydicom.dcmread(paths_breast[2])
-        pixels = np.frombuffer(ds.PixelData, dtype=np.uint16).copy().reshape((128, 128))
-        pixels[62:67, 0:10] = 924 # -100 HU
-        ds.PixelData = pixels.tobytes()
-        ds.save_as(paths_breast[2], write_like_original=False)
+        # A 5 x 10 mm lateral block touching the left FOV edge has no torso
+        # core (it vanishes under the 30 mm opening), so it is treated as an
+        # arm/elbow: INFO for every protocol, never a truncation error.
+        for protocol, study in (("Breast Wingboard Scan", "Thorax Study"),
+                                ("H&N C-Spine", "Brain Study"),
+                                ("Pelvis Prostate", "Prostate Study")):
+            paths = self.create_ct_series(protocol=protocol, study_desc=study)
+            ds = pydicom.dcmread(paths[2])
+            pixels = np.frombuffer(ds.PixelData, dtype=np.uint16).copy().reshape((128, 128))
+            pixels[62:67, 0:10] = 924  # -100 HU
+            ds.PixelData = pixels.tobytes()
+            ds.save_as(paths[2], write_like_original=False)
 
-        result_breast = self.engine.analyze_series(paths_breast)
-        # Check if TRUNCATION_ERROR is NOT in flags
-        truncation_flags = [f for f in result_breast.flags if "TRUNCATION_ERROR" in f.message]
-        self.assertEqual(len(truncation_flags), 0, "Breast scan should tolerate 10mm lateral truncation")
-
-        # Verify metrics for tolerated truncation
-        self.assertIn("tolerated_truncated_slices", result_breast.metrics)
-        self.assertEqual(result_breast.metrics["tolerated_truncated_slices"], [3])
-        self.assertEqual(result_breast.metrics["truncated_slices"], [])
-        self.assertTrue(result_breast.metrics["truncation_detected"])
-        self.assertFalse(result_breast.metrics["truncation_error"])
-
-        # 2. Test Head/Neck protocol (5 mm tolerance) -> Should reject
-        paths_hn = self.create_ct_series(protocol="H&N C-Spine", study_desc="Brain Study")
-        ds = pydicom.dcmread(paths_hn[2])
-        pixels = np.frombuffer(ds.PixelData, dtype=np.uint16).copy().reshape((128, 128))
-        pixels[62:67, 0:10] = 924
-        ds.PixelData = pixels.tobytes()
-        ds.save_as(paths_hn[2], write_like_original=False)
-
-        result_hn = self.engine.analyze_series(paths_hn)
-        truncation_flags_hn = [f for f in result_hn.flags if "TRUNCATION_ERROR" in f.message]
-        self.assertGreater(len(truncation_flags_hn), 0, "H&N scan should NOT tolerate 10mm lateral truncation")
-        self.assertEqual(result_hn.metrics["truncated_slices"], [3])
-        self.assertEqual(result_hn.metrics["tolerated_truncated_slices"], [])
-        self.assertTrue(result_hn.metrics["truncation_detected"])
-        self.assertTrue(result_hn.metrics["truncation_error"])
-
-        # 3. Test Pelvis/Prostate protocol (0 mm tolerance) -> Should reject
-        paths_pelvis = self.create_ct_series(protocol="Pelvis Prostate", study_desc="Prostate Study")
-        ds = pydicom.dcmread(paths_pelvis[2])
-        pixels = np.frombuffer(ds.PixelData, dtype=np.uint16).copy().reshape((128, 128))
-        pixels[62:67, 0:10] = 924
-        ds.PixelData = pixels.tobytes()
-        ds.save_as(paths_pelvis[2], write_like_original=False)
-
-        result_pelvis = self.engine.analyze_series(paths_pelvis)
-        truncation_flags_pelvis = [f for f in result_pelvis.flags if "TRUNCATION_ERROR" in f.message]
-        self.assertGreater(len(truncation_flags_pelvis), 0, "Pelvis scan should NOT tolerate 10mm lateral truncation")
-        self.assertEqual(result_pelvis.metrics["truncated_slices"], [3])
-        self.assertEqual(result_pelvis.metrics["tolerated_truncated_slices"], [])
-        self.assertTrue(result_pelvis.metrics["truncation_detected"])
-        self.assertTrue(result_pelvis.metrics["truncation_error"])
+            result = self.engine.analyze_series(paths)
+            self.assertFalse(any("TRUNCATION_ERROR" in f.message for f in result.flags), protocol)
+            self.assertEqual(result.metrics["tolerated_truncated_slices"], [3], protocol)
+            self.assertEqual(result.metrics["truncated_slices"], [], protocol)
+            self.assertTrue(result.metrics["truncation_detected"], protocol)
+            self.assertFalse(result.metrics["truncation_error"], protocol)
+            fov_flag = [f for f in result.flags if f.name == "GeometryGuardian"][0]
+            self.assertEqual(fov_flag.status, "INFO", protocol)
+            self.assertIn("Arm/elbow", fov_flag.message)
 
     def test_generate_pdf_report_with_tolerated_truncation(self):
         paths_breast = self.create_ct_series(protocol="Breast Wingboard Scan", study_desc="Thorax Study")
@@ -187,6 +150,14 @@ thresholds:
         truncation_flags_pelvis = [f for f in result_pelvis.flags if "TRUNCATION_ERROR" in f.message]
         self.assertEqual(len(truncation_flags_pelvis), 0, "Pelvis scan should ignore posterior table contact due to body segmentation")
 
+    def _assert_body_mask_sanity_failed(self, result):
+        cavity = [f for f in result.flags if f.name == "CavityScout"]
+        statuses = {f.status for f in cavity}
+        self.assertIn("BODY_MASK_SANITY", " ".join(f.message for f in cavity if f.status == "CONDITIONAL"))
+        self.assertNotIn("REJECT", statuses)
+        self.assertTrue(any(f.status == "INFO" and "unreliable" in f.message for f in cavity))
+        self.assertFalse(any("SEGMENTATION_LEAK" in f.message for f in cavity))
+
     def test_cavity_scout_gas_detection(self):
         # 1. Test moderate gas volume on pelvic scan (lower 50% only) -> Should be CONDITIONAL
         paths_pelvis_mod = self.create_ct_series(protocol="Pelvis Prostate", study_desc="Prostate Study", num_slices=10, pixel_spacing=[1.5, 1.5])
@@ -207,10 +178,9 @@ thresholds:
         self.assertGreater(result_mod.metrics["gas_volume_cc"], 15.0)
         self.assertLessEqual(result_mod.metrics["gas_volume_cc"], 50.0)
 
-        gas_flags_mod = [f for f in result_mod.flags if f.name == "CavityScout"]
-        self.assertEqual(len(gas_flags_mod), 1)
-        self.assertEqual(gas_flags_mod[0].status, "CONDITIONAL")
-        self.assertNotIn("SEGMENTATION_LEAK", gas_flags_mod[0].message)
+        # The cavity is ~47% of this small phantom body: the body-mask sanity
+        # check flags it and the gas value is reported as unreliable INFO.
+        self._assert_body_mask_sanity_failed(result_mod)
 
         # 2. Test excessive gas volume on pelvic scan (lower 50% only) -> Should be REJECT
         paths_pelvis_exc = self.create_ct_series(protocol="Pelvis Prostate", study_desc="Prostate Study", num_slices=10, pixel_spacing=[1.5, 1.5])
@@ -231,12 +201,9 @@ thresholds:
         self.assertGreater(result_exc.metrics["gas_volume_cc"], 50.0)
         self.assertLessEqual(result_exc.metrics["gas_volume_cc"], 100.0)
 
-        gas_flags_exc = [f for f in result_exc.flags if f.name == "CavityScout"]
-        self.assertEqual(len(gas_flags_exc), 1)
-        self.assertEqual(gas_flags_exc[0].status, "REJECT")
-        self.assertNotIn("SEGMENTATION_LEAK", gas_flags_exc[0].message)
+        self._assert_body_mask_sanity_failed(result_exc)
 
-        # 3. Test massive gas volume (>100 cc) on pelvic scan -> Should trigger SEGMENTATION_LEAK
+        # 3. Massive gas volume (>100 cc): the body-mask sanity check replaces the old SEGMENTATION_LEAK reject
         paths_pelvis_leak = self.create_ct_series(protocol="Pelvis Prostate", study_desc="Prostate Study", num_slices=10, pixel_spacing=[1.5, 1.5])
         for path in paths_pelvis_leak:
             ds = pydicom.dcmread(path)
@@ -254,10 +221,7 @@ thresholds:
         result_leak = self.engine.analyze_series(paths_pelvis_leak)
         self.assertGreater(result_leak.metrics["gas_volume_cc"], 100.0)
 
-        gas_flags_leak = [f for f in result_leak.flags if f.name == "CavityScout"]
-        self.assertEqual(len(gas_flags_leak), 1)
-        self.assertEqual(gas_flags_leak[0].status, "REJECT")
-        self.assertIn("SEGMENTATION_LEAK", gas_flags_leak[0].message)
+        self._assert_body_mask_sanity_failed(result_leak)
 
         # 4. Test thoracic scan bypass -> Gas volume should be 0.0 and no CavityScout flags
         paths_thorax = self.create_ct_series(protocol="Thorax Lung Scan", study_desc="Chest Thorax", num_slices=10, pixel_spacing=[1.5, 1.5])
@@ -277,7 +241,7 @@ thresholds:
         result_thorax = self.engine.analyze_series(paths_thorax)
         self.assertEqual(result_thorax.metrics["gas_volume_cc"], 0.0)
         gas_flags_thorax = [f for f in result_thorax.flags if f.name == "CavityScout"]
-        self.assertEqual(len(gas_flags_thorax), 0)
+        self.assertEqual([f.status for f in gas_flags_thorax], ["SKIPPED"])
 
     def test_empty_slice_rejection(self):
         # Create a series where slice 0 is completely empty, slice 1 has some noise (< 500 contiguous pixels, e.g. 5x5 pixels),
@@ -362,12 +326,11 @@ thresholds:
         # Verify critical truncation error is FALSE
         self.assertFalse(result.metrics["truncation_error"])
 
-        # Verify flagged warning status is CONDITIONAL
-        gg_flags = [f for f in result.flags if f.name == "GeometryGuardian"]
-        self.assertEqual(len(gg_flags), 1)
-        self.assertEqual(gg_flags[0].status, "CONDITIONAL")
-        self.assertIn("Accessory", gg_flags[0].message)
-        self.assertIn("Slice 3", gg_flags[0].message)
+        # Accessory-only truncation is INFO
+        fov_flag = [f for f in result.flags if f.name == "GeometryGuardian"][0]
+        self.assertEqual(fov_flag.status, "INFO")
+        self.assertIn("Accessory", fov_flag.message)
+        self.assertIn("Slice 3", fov_flag.message)
 
     def test_head_scan_non_circular_fov_corners_bypass(self):
         # Simulate a head scan with a rectangular / non-circular FOV (with cut-off corners).

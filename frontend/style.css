@@ -12,6 +12,7 @@
   --reject: var(--error);
   --conditional: var(--warning);
   --accept: var(--success);
+  --info: #3b82f6;
   --skipped: #64748b;
   --glass: rgba(255, 255, 255, 0.05);
   --border: rgba(255, 255, 255, 0.1);
@@ -145,6 +146,7 @@ td {
 .badge-accept { background: rgba(16, 185, 129, 0.2); color: var(--success); }
 .badge-conditional { background: rgba(245, 158, 11, 0.2); color: var(--warning); }
 .badge-reject { background: rgba(239, 68, 68, 0.2); color: var(--error); }
+.badge-info { background: rgba(59, 130, 246, 0.2); color: var(--info); }
 .badge-skipped { background: rgba(100, 116, 139, 0.2); color: var(--skipped); }
 .badge-pending { background: var(--glass); color: var(--text-muted); }
 .badge-ingesting { background: rgba(0, 210, 255, 0.2); color: var(--primary); }

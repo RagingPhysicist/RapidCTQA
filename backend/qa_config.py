@@ -4,39 +4,38 @@ Every clinical limit used by the QA agents lives here, and the loader rejects
 unknown keys. A typo or a section the engine does not read (for example a
 ``rules:`` block) is a startup error, not a silently ignored setting.
 
+``protocol_overrides`` adjust thresholds per protocol: each entry whose
+``match`` string occurs in the series' ProtocolName (case-insensitive) is
+deep-merged over the defaults, in file order (later entries win). Overrides
+are validated against the same schema at load time.
+
 Defaults match the shipped ``ctqa.yaml``, so a partial config file (as used in
 the tests) behaves the same as the full one for any key it leaves out.
 """
-from typing import Any, Dict, List, Tuple
+import copy
+from typing import Any, Dict, List, Optional, Tuple
 
 import yaml
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import BaseModel, ConfigDict, PrivateAttr, model_validator
 
 
 class _Section(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
 
-class LateralToleranceMM(_Section):
-    lenient: float = 15.0     # Thorax / Chest / Breast: flared wingboard elbows
-    head_neck: float = 5.0
-    default: float = 0.0      # Pelvis / Prostate / everything else
-
-
 class GeometryThresholds(_Section):
-    edge_buffer_px: int = 3
-    min_edge_pixels: int = 5
-    lateral_tolerance_mm: LateralToleranceMM = LateralToleranceMM()
-    accessory_lateral_tolerance_mm: float = 15.0
-    lenient_protocol_keywords: List[str] = ["THORAX", "CHEST", "BREAST"]
-    head_neck_keywords: List[str] = ["head", "neck", "brain", "c-spine", "cspine", "cervical"]
+    edge_buffer_px: int = 3                    # FOV border ring checked for contact
+    min_edge_pixels: int = 5                   # fewer contact pixels on a slice are ignored
+    torso_core_opening_mm: float = 30.0        # opening that strips arms/elbows off the torso
+    max_lateral_truncation_z_mm: float = 12.0  # torso lateral contact up to this z-extent -> CONDITIONAL, longer -> REJECT
     max_slice_spacing_variation_mm: float = 1.0
     max_gantry_tilt_deg: float = 1.0
 
 
 class SliceThicknessThresholds(_Section):
-    preferred_max_mm: float = 3.0
-    absolute_max_mm: float = 5.0
+    nominal_mm: Optional[float] = None         # expected thickness for the protocol (None = no nominal check)
+    tolerance_mm: float = 0.5                  # deviation from nominal beyond this -> CONDITIONAL
+    absolute_max_mm: float = 5.0               # thicker -> REJECT
 
 
 class IntegrityThresholds(_Section):
@@ -61,32 +60,49 @@ class FluidThresholds(_Section):
 
 
 class GasThresholds(_Section):
-    conditional_cc: float = 15.0
-    reject_cc: float = 50.0
-    leak_cc: float = 100.0
+    info_max_cc: float = 30.0                  # below: INFO
+    large_cc: float = 75.0                     # CONDITIONAL "moderate" up to here, "large" above
+    reject_cc: Optional[float] = 150.0         # above: REJECT (None = never reject, e.g. abdomen)
+    max_gas_body_fraction: float = 0.10        # body-mask sanity: gas above this share of the evaluated body volume
     couch_exclusion_mm: float = 15.0
     pelvis_keywords: List[str] = ["PELVIS", "PROSTATE", "ABD", "ABDOMEN", "RECTUM", "GYN", "PELVIC"]
 
     @model_validator(mode="after")
     def _ordered(self):
-        if not (self.conditional_cc <= self.reject_cc <= self.leak_cc):
-            raise ValueError("gas thresholds must satisfy conditional_cc <= reject_cc <= leak_cc")
+        if not self.info_max_cc <= self.large_cc:
+            raise ValueError("gas thresholds must satisfy info_max_cc <= large_cc")
+        if self.reject_cc is not None and self.reject_cc < self.large_cc:
+            raise ValueError("gas reject_cc must be >= large_cc (or null)")
         return self
 
 
 class ImplantThresholds(_Section):
     metal_threshold_hu: float = 3000.0
-    max_volume_cc: float = 0.2
+    internal_info_max_cc: float = 2.0          # internal metal below: INFO, at/above: CONDITIONAL
+    surface_info_max_cc: float = 10.0
+    external_info_max_cc: float = 5.0
+    pelvis_internal_conditional_cc: float = 5.0  # pelvis scans: internal metal at/above is always CONDITIONAL
+    pelvis_keywords: List[str] = ["PELVIS", "PROSTATE", "RECTUM", "GYN", "PELVIC", "BLADDER"]
     internal_margin_mm: float = 10.0
     marker_max_volume_cc: float = 0.1
 
 
 class AlignmentThresholds(_Section):
-    max_allowable_tilt_deg: float = 1.5
-    min_confidence: float = 0.95
-    symmetry_gate: float = 0.90
+    info_deg: float = 1.5                      # |roll| above: INFO
+    conditional_deg: float = 3.0               # |roll| above: CONDITIONAL
+    min_correlation: float = 0.90              # below: estimate unreliable (INFO)
+    search_range_deg: float = 30.0             # mirror-rotation search range (roll range is half)
+    step_deg: float = 0.25
+    edge_margin_deg: float = 0.5               # best angle this close to the search limit: unreliable
     hu_floor: float = -300.0
-    angular_step_deg: float = 0.1
+    hu_ceiling: float = 300.0
+    downsample: int = 4
+
+    @model_validator(mode="after")
+    def _ordered(self):
+        if not self.info_deg <= self.conditional_deg:
+            raise ValueError("alignment thresholds must satisfy info_deg <= conditional_deg")
+        return self
 
 
 class Thresholds(_Section):
@@ -101,9 +117,53 @@ class Thresholds(_Section):
     alignment: AlignmentThresholds = AlignmentThresholds()
 
 
+class ProtocolOverride(_Section):
+    match: str                                 # case-insensitive substring of ProtocolName
+    thresholds: Dict[str, Any]
+
+
+def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+    merged = copy.deepcopy(base)
+    for key, value in (override or {}).items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
 class QAConfig(_Section):
     sop: Dict[str, Any] = {}
     thresholds: Thresholds = Thresholds()
+    protocol_overrides: List[ProtocolOverride] = []
+    _resolved: Dict[str, Thresholds] = PrivateAttr(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _validate_overrides(self):
+        base = self.thresholds.model_dump()
+        for o in self.protocol_overrides:
+            if not o.match.strip():
+                raise ValueError("protocol_overrides entries need a non-empty match string")
+            try:
+                Thresholds.model_validate(_deep_merge(base, o.thresholds))
+            except Exception as exc:
+                raise ValueError(f"protocol_overrides[match={o.match!r}]: {exc}") from exc
+        return self
+
+    def matching_overrides(self, protocol: str) -> List[str]:
+        p = (protocol or "").upper()
+        return [o.match for o in self.protocol_overrides if o.match.strip().upper() in p]
+
+    def thresholds_for(self, protocol: Optional[str]) -> Thresholds:
+        """Thresholds for a series, with every matching protocol override applied."""
+        key = (protocol or "").upper()
+        if key not in self._resolved:
+            merged = self.thresholds.model_dump()
+            matched = [o for o in self.protocol_overrides if o.match.strip().upper() in key]
+            for o in matched:
+                merged = _deep_merge(merged, o.thresholds)
+            self._resolved[key] = Thresholds.model_validate(merged) if matched else self.thresholds
+        return self._resolved[key]
 
 
 def load_qa_config(path: str) -> QAConfig:

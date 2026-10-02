@@ -36,15 +36,29 @@ RapidCTQA is a specialized automated Quality Assurance (QA) tool for radiotherap
     - **DICOM Listener**: `0.0.0.0:11112` (AET: Configurable in `webApp.yaml`, defaults to `RT_QA_SCP`)
 
 ## QA Verdicts
-Every check produces a flag of `ACCEPT`, `CONDITIONAL` (clinician review) or `REJECT`; purely informational flags are `SKIPPED`. A series is `REJECT` if any flag rejects, otherwise `CONDITIONAL` if any flag needs review, otherwise `ACCEPT`. Only `ACCEPT` series are exported to the TPS automatically.
+Every check reports one flag on every run, with the measured value and its limit, so the PDF report lists all tests:
 
-All limits quoted below are defaults from `ctqa.yaml`, which is the single source of truth for thresholds. The file is validated at startup, so an unknown key is an error rather than a silently ignored setting.
+| Flag | Meaning |
+|------|---------|
+| `ACCEPT` | Check passed. |
+| `INFO` | Finding reported with its value, not actionable (e.g. small metal, arm at the FOV edge, mild roll). Never escalates. |
+| `CONDITIONAL` | Clinician review required. |
+| `REJECT` | Series must not be used (rescan / resend). |
+| `SKIPPED` | Check does not apply (e.g. fluid HU with IV contrast). |
+
+A series is `REJECT` if any flag rejects, otherwise `CONDITIONAL` if any flag needs review, otherwise `ACCEPT`. Only `ACCEPT` series are exported to the TPS automatically, and only `CONDITIONAL` / `REJECT` results are written to the problem log.
+
+All limits below are defaults from `ctqa.yaml`, the single source of truth for thresholds. It supports per-protocol overrides (substring match on the protocol name) and is validated at startup, so an unknown key is an error rather than a silently ignored setting.
 
 ## QA Agents & Logic
 
 ### 1. GeometryGuardian (Geometry & Truncation)
 Ensures geometric integrity and FOV coverage.
-- **Truncation**: Detects if the patient body touches the FOV edge (3 px border). Anterior/posterior contact rejects; lateral clipping is tolerated up to 15 mm (Thorax/Breast), 5 mm (Head & Neck) or 0 mm (others).
+- **Truncation**: Checks where the patient body touches the FOV border.
+  - Anterior/posterior contact: `REJECT`, on any number of slices.
+  - Lateral contact where the torso core (body after a 30 mm opening) also touches the border: `CONDITIONAL` up to a 12 mm z-extent, `REJECT` beyond.
+  - Lateral contact by an arm/elbow with the torso clear: `INFO`.
+  - Accessory/couch contact only: `INFO`.
 - **Consistency**: Validates monotonic slice positions and consistent slice spacing.
 - **Tilt**: Flags gantry tilt exceeding 1.0°.
 
@@ -55,30 +69,32 @@ Analyzes hardware performance and calibration.
 
 ### 3. FluidPhysicist (HU Accuracy)
 Validates CT number consistency using biological markers.
-- **HU Consistency**: Evaluates median HU of soft tissue and fluid (0-50 HU range).
+- **HU Consistency**: Median HU of fluid (0–30 HU, falling back to 0–50 HU); review above 40 HU, reject above 50 HU. Skipped with IV contrast.
 - **Rescale Slope**: Ensures valid DICOM rescale metadata.
 
 ### 4. CavityScout (Air & Gas Auditor)
-Detects gas pockets that may impact dose calculation.
-- **Logic**: Isolates voxels < -500 HU within the body mask.
-- **Thresholds**: Flags moderate (>15 cc, conditional), excessive (>50 cc, reject) or non-physiological (>100 cc, reject) gas in pelvis/abdomen scans.
+Detects gas pockets that may impact dose calculation (pelvis/abdomen scans).
+- **Logic**: Enclosed air inside the body mask in the inferior half of the series.
+- **Thresholds**: `INFO` below 30 cc, `CONDITIONAL` from 30 cc (moderate, large above 75 cc), `REJECT` above 150 cc. Abdomen protocols are never rejected on volume.
+- **Body-mask sanity**: If gas exceeds 10% of the evaluated body volume, the body mask is suspect: `CONDITIONAL` to verify the contour, and the gas value is reported as unreliable.
 
 ### 5. ImplantAuditor (Metal Detection)
-Detects and classifies metallic objects (>3000 HU, flagged above 0.2 cc per class).
+Detects and classifies metallic objects (>3000 HU).
 - **Classification**: Distinguishes between internal implants, surface markers, and external objects.
+- **Thresholds**: `INFO` below 2 cc internal, 10 cc surface, 5 cc external; `CONDITIONAL` at or above. Pelvis scans: internal metal of 5 cc or more is always `CONDITIONAL`.
+- **4DCT**: Metal is evaluated once per group, on the reference phase; the other phases report a single `INFO` flag.
 - **Validation**: Uses morphological erosion to define an internal body buffer.
 
 ### 6. AlignmentAuditor (Patient Orientation)
-Checks for patient rotation relative to the couch.
-- **Roll Detection**: Quantifies precise patient roll by locating the true axis of bilateral reflection symmetry on the central slice of the series.
-- **Radon Transform Sweep**: Performs a fine-grained Radon transform sinogram sweep around the vertical axis (90°) with configurable thresholding and angular resolution.
-- **Symmetry Confidence**: Computes normalized cross-correlation between the projection profile and its mirrored counterpart. Requires confidence > 0.95 to trigger.
-- **Threshold**: Flags warnings (`ROLL_ALERT`) if roll exceeds 1.5° (or as configured in `ctqa.yaml`).
+Checks for patient roll on the central slice.
+- **Method**: Weights the largest body component by clipped HU, centres it, mirrors it left-right and finds the rotation (±30°) of the mirror image that best correlates with the original; roll is half that angle. Positive roll is clockwise as displayed.
+- **Thresholds**: `INFO` above 1.5°, `CONDITIONAL` (`ROLL_ALERT`) above 3°.
+- **Reliability**: A correlation below 0.90 or a best angle at the search limit gives an "unreliable" `INFO` instead of an alert.
 
 ### 7. Integrity (Protocol & Resolution)
 Lead oversight for general clinical standards.
 - **Pediatric Check**: Compares parsed `PatientAge` (VR: AS) against protocol/study markers (e.g., "(Child)").
-- **Resolution**: Flags series with slice thickness > 3mm (Warning) or > 5mm (Reject).
+- **Slice Thickness**: `REJECT` above 5 mm. Below that, only deviation from the protocol's nominal thickness (set per protocol in `ctqa.yaml`, ±0.5 mm) is `CONDITIONAL`. Without a nominal, there is no thickness warning.
 
 ## Security
 RapidCTQA handles patient data and can delete series and push them to the TPS, so the defaults are conservative:

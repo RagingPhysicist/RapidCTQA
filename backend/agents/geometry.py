@@ -1,9 +1,22 @@
-"""GeometryGuardian: FOV truncation, slice spacing, slice ordering and gantry tilt."""
+"""GeometryGuardian: FOV truncation, slice spacing, slice ordering and gantry tilt.
+
+Truncation classification per slice (contact = body mask in the FOV border ring):
+  * anterior / posterior contact          -> critical (REJECT at any extent)
+  * lateral-only contact, torso core also touches the border
+                                          -> torso truncation; graded by z-extent
+  * lateral-only contact, torso core clear -> arm / elbow (INFO)
+  * accessory / couch contact only         -> INFO
+
+The torso core is the body mask after a morphological opening (default 30 mm),
+keeping the largest component: it strips arms and elbows that touch the torso
+through narrow contacts or lie separately beside it.
+"""
 from typing import Any, Dict, List
 
 import numpy as np
+import scipy.ndimage as ndimage
 
-from backend.agents.base import SeriesContext, format_slices, mentions_any
+from backend.agents.base import SeriesContext, format_slices
 from backend.models import QAFlag
 from backend.qa_config import Thresholds
 from backend.status import QAStatus
@@ -11,13 +24,43 @@ from backend.status import QAStatus
 NAME = "GeometryGuardian"
 
 
+def _border_ring(H: int, W: int, edge: int) -> np.ndarray:
+    ring = np.zeros((H, W), dtype=bool)
+    ring[:edge, :] = True
+    ring[-edge:, :] = True
+    ring[:, :edge] = True
+    ring[:, -edge:] = True
+    return ring
+
+
+def _disk(radius_px: int) -> np.ndarray:
+    r = max(1, radius_px)
+    y, x = np.ogrid[-r:r + 1, -r:r + 1]
+    return x * x + y * y <= r * r
+
+
+def _torso_core(body_slice: np.ndarray, radius_px: int) -> np.ndarray:
+    opened = ndimage.binary_opening(body_slice, structure=_disk(radius_px))
+    labeled, n = ndimage.label(opened)
+    if n == 0:
+        return opened
+    sizes = ndimage.sum(opened, labeled, range(1, n + 1))
+    return labeled == (1 + int(np.argmax(sizes)))
+
+
+def _has_anterior_posterior_contact(ys, xs, center_y, center_x) -> bool:
+    """Any contact pixel outside the lateral sectors (315°-45° and 135°-225°)."""
+    angles = np.degrees(np.arctan2(ys - center_y, xs - center_x)) % 360
+    lateral = (angles >= 315.0) | (angles <= 45.0) | ((angles >= 135.0) & (angles <= 225.0))
+    return bool(np.any(~lateral))
+
+
 def compute(ctx: SeriesContext) -> Dict[str, Any]:
     cfg = ctx.thresholds.geometry
     datasets = ctx.datasets
     hu_volume = ctx.hu_volume
-    patient_body_mask = ctx.interior_mask
-    accessory_table_mask = ctx.accessory_table_mask
-    pixel_spacing = ctx.pixel_spacing
+    body = ctx.interior_mask
+    accessories = ctx.accessory_table_mask
 
     # --- Slice ordering & spacing ---
     z_positions = [float(ds.ImagePositionPatient[2]) for ds in datasets]
@@ -26,153 +69,120 @@ def compute(ctx: SeriesContext) -> Dict[str, Any]:
     monotonic_z = all(np.diff(z_positions) > 0) or all(np.diff(z_positions) < 0)
     duplicate_slices = len(set(z_positions)) != len(z_positions)
 
-    # --- Protocol group for lateral truncation tolerance ---
-    is_head_scan = mentions_any(cfg.head_neck_keywords, ctx.study_desc, ctx.protocol, ctx.body_part)
-    is_lenient_protocol = mentions_any(cfg.lenient_protocol_keywords, ctx.protocol)
-    if is_lenient_protocol:
-        lateral_tol_mm = cfg.lateral_tolerance_mm.lenient
-    elif is_head_scan:
-        lateral_tol_mm = cfg.lateral_tolerance_mm.head_neck
-    else:
-        lateral_tol_mm = cfg.lateral_tolerance_mm.default
-
     _, H, W = hu_volume.shape
     center_y, center_x = H // 2, W // 2
+    ring = _border_ring(H, W, cfg.edge_buffer_px)
+    # Border length per contact pixel: mean in-plane pixel size
+    px_mm = (ctx.pixel_spacing[0] + ctx.pixel_spacing[1]) / 2.0
+    core_radius_px = int(round(cfg.torso_core_opening_mm / 2.0 / px_mm))
 
-    edge_buffer = cfg.edge_buffer_px
-    border_mask = np.zeros((H, W), dtype=bool)
-    border_mask[:edge_buffer, :] = True
-    border_mask[-edge_buffer:, :] = True
-    border_mask[:, :edge_buffer] = True
-    border_mask[:, -edge_buffer:] = True
-
-    truncation_error = False
-    truncated_slices: List[int] = []
-    tolerated_truncated_slices: List[int] = []
-    accessory_truncation_detected = False
-    accessory_truncated_slices: List[int] = []
+    ap_slices: List[int] = []
+    torso_lateral_slices: List[int] = []
+    limb_slices: List[int] = []
+    accessory_slices: List[int] = []
+    max_contact_mm = 0.0
 
     for i in range(hu_volume.shape[0]):
-        # Validated empty slices bypass truncation checks
         if i + 1 in ctx.empty_slices:
+            continue  # validated empty slices bypass truncation checks
+
+        ys, xs = np.where(body[i] & ring)
+        if len(ys) >= cfg.min_edge_pixels:
+            max_contact_mm = max(max_contact_mm, len(ys) / cfg.edge_buffer_px * px_mm)
+            if _has_anterior_posterior_contact(ys, xs, center_y, center_x):
+                ap_slices.append(i + 1)
+            elif np.any(_torso_core(body[i], core_radius_px) & ring):
+                torso_lateral_slices.append(i + 1)
+            else:
+                limb_slices.append(i + 1)
             continue
 
-        # Stage A: Patient body truncation (critical)
-        trunc_y, trunc_x = np.where(patient_body_mask[i] & border_mask)
-        patient_truncated_this_slice = False
+        # Accessory / couch contact only. With a TotalSegmentator body mask
+        # "accessories" are everything outside the body, so it is not reported.
+        if not ctx.used_totalsegmentator and np.count_nonzero(accessories[i] & ring) >= cfg.min_edge_pixels:
+            accessory_slices.append(i + 1)
 
-        if len(trunc_y) >= cfg.min_edge_pixels:
-            angles_deg = np.degrees(np.arctan2(trunc_y - center_y, trunc_x - center_x)) % 360
-
-            critical_violation_found = False
-            lateral_violation_count = 0
-            max_lateral_depth_mm = 0.0
-
-            for angle in angles_deg:
-                is_right_lateral = (315.0 <= angle or angle <= 45.0)
-                is_left_lateral = (135.0 <= angle <= 225.0)
-                if is_right_lateral or is_left_lateral:
-                    lateral_violation_count += 1
-                else:
-                    # Anterior or posterior core sector
-                    critical_violation_found = True
-                    break
-
-            if not critical_violation_found and lateral_violation_count > 0:
-                left_mask = (trunc_x < edge_buffer)
-                if np.any(left_mask):
-                    left_rows = trunc_y[left_mask]
-                    depth_px = int(np.max(np.where(patient_body_mask[i][left_rows, :])[1]) + 1)
-                    max_lateral_depth_mm = max(max_lateral_depth_mm, depth_px * pixel_spacing[0])
-
-                right_mask = (trunc_x >= W - edge_buffer)
-                if np.any(right_mask):
-                    right_rows = trunc_y[right_mask]
-                    depth_px = int((W - 1) - np.min(np.where(patient_body_mask[i][right_rows, :])[1]) + 1)
-                    max_lateral_depth_mm = max(max_lateral_depth_mm, depth_px * pixel_spacing[0])
-
-            if critical_violation_found or (lateral_violation_count > 0 and max_lateral_depth_mm > lateral_tol_mm):
-                patient_truncated_this_slice = True
-                truncation_error = True
-                truncated_slices.append(i + 1)
-            elif lateral_violation_count > 0:
-                tolerated_truncated_slices.append(i + 1)
-
-        # Stage B: Standalone accessory / table truncation (non-critical).
-        # Skipped with a TotalSegmentator mask: its "accessories" are everything
-        # outside the body, so clipping there is not reported.
-        if not patient_truncated_this_slice and not ctx.used_totalsegmentator:
-            acc_trunc_y, acc_trunc_x = np.where(accessory_table_mask[i] & border_mask)
-            if len(acc_trunc_y) >= cfg.min_edge_pixels:
-                # Lenient protocols: shallow accessory clipping is a tolerated
-                # truncation; deep clipping escalates to a critical error.
-                classified_as_tolerated = False
-                if is_lenient_protocol:
-                    max_acc_lateral_depth_mm = 0.0
-                    left_acc = (acc_trunc_x < edge_buffer)
-                    if np.any(left_acc):
-                        left_rows = acc_trunc_y[left_acc]
-                        right_extent = int(np.max(np.where(accessory_table_mask[i][left_rows, :])[1]) + 1)
-                        max_acc_lateral_depth_mm = max(max_acc_lateral_depth_mm, right_extent * pixel_spacing[0])
-                    right_acc = (acc_trunc_x >= W - edge_buffer)
-                    if np.any(right_acc):
-                        right_rows = acc_trunc_y[right_acc]
-                        left_extent = int((W - 1) - np.min(np.where(accessory_table_mask[i][right_rows, :])[1]) + 1)
-                        max_acc_lateral_depth_mm = max(max_acc_lateral_depth_mm, left_extent * pixel_spacing[0])
-                    if max_acc_lateral_depth_mm < cfg.accessory_lateral_tolerance_mm:
-                        tolerated_truncated_slices.append(i + 1)
-                    else:
-                        truncation_error = True
-                        truncated_slices.append(i + 1)
-                    classified_as_tolerated = True  # prevents double-counting in the accessory list
-                if not classified_as_tolerated:
-                    accessory_truncation_detected = True
-                    accessory_truncated_slices.append(i + 1)
+    torso_z_extent_mm = len(torso_lateral_slices) * ctx.slice_spacing_mm
+    truncation_error = bool(ap_slices) or torso_z_extent_mm > cfg.max_lateral_truncation_z_mm
 
     return {
         "slice_spacing_var": slice_spacing_var,
+        "slice_spacing_mm": ctx.slice_spacing_mm,
         "monotonic_z": monotonic_z,
         "duplicate_slices": duplicate_slices,
         "gantry_tilt": float(getattr(datasets[0], 'GantryDetectorTilt', 0.0)),
-        "truncation_detected": truncation_error or len(tolerated_truncated_slices) > 0,
+        "truncation_detected": bool(ap_slices or torso_lateral_slices or limb_slices),
         "truncation_error": truncation_error,
-        "truncated_slices": truncated_slices,
-        "tolerated_truncated_slices": tolerated_truncated_slices,
-        "accessory_truncation_detected": accessory_truncation_detected,
-        "accessory_truncated_slices": accessory_truncated_slices,
+        "truncated_slices": sorted(ap_slices + torso_lateral_slices),
+        "anterior_posterior_truncated_slices": ap_slices,
+        "lateral_torso_truncated_slices": torso_lateral_slices,
+        "lateral_truncation_z_extent_mm": torso_z_extent_mm,
+        "max_contact_length_mm": max_contact_mm,
+        "tolerated_truncated_slices": limb_slices,
+        "accessory_truncation_detected": bool(accessory_slices),
+        "accessory_truncated_slices": accessory_slices,
         "empty_slices": ctx.empty_slices,
         "used_totalsegmentator": ctx.used_totalsegmentator,
     }
 
 
+def _truncation_flag(metrics: Dict[str, Any], t: Thresholds) -> QAFlag:
+    cfg = t.geometry
+    ap = metrics.get("anterior_posterior_truncated_slices", [])
+    torso = metrics.get("lateral_torso_truncated_slices", [])
+    limbs = metrics.get("tolerated_truncated_slices", [])
+    accessories = metrics.get("accessory_truncated_slices", [])
+    contact = metrics.get("max_contact_length_mm", 0.0)
+    z_mm = metrics.get("lateral_truncation_z_extent_mm", 0.0)
+    limit = cfg.max_lateral_truncation_z_mm
+
+    if ap:
+        return QAFlag(name=NAME, status=QAStatus.REJECT, message=(
+            f"TRUNCATION_ERROR: Patient Body Truncation Detected (Anatomy exceeds FOV), anterior/posterior "
+            f"contact, max contact {contact:.0f} mm{format_slices(ap)}"))
+    if torso:
+        status = QAStatus.REJECT if z_mm > limit else QAStatus.CONDITIONAL
+        prefix = "TRUNCATION_ERROR: " if status == QAStatus.REJECT else ""
+        return QAFlag(name=NAME, status=status, message=(
+            f"{prefix}Lateral torso truncation over {z_mm:.1f} mm z-extent (limit {limit:g} mm), "
+            f"max contact {contact:.0f} mm{format_slices(torso)}"))
+    if limbs:
+        return QAFlag(name=NAME, status=QAStatus.INFO, message=(
+            f"Arm/elbow at FOV edge, torso clear (max contact {contact:.0f} mm){format_slices(limbs)}"))
+    if accessories:
+        return QAFlag(name=NAME, status=QAStatus.INFO, message=(
+            f"Accessory / Positioning Device Truncated at FOV Edge (Non-Critical Body Anatomy){format_slices(accessories)}"))
+    return QAFlag(name=NAME, status=QAStatus.ACCEPT, message="FOV: no truncation detected")
+
+
 def evaluate(metrics: Dict[str, Any], t: Thresholds) -> List[QAFlag]:
     cfg = t.geometry
-    flags = []
+    flags = [_truncation_flag(metrics, t)]
 
-    if metrics.get("truncation_error", False):
-        slice_info = format_slices(metrics.get("truncated_slices", []))
-        flags.append(QAFlag(name=NAME, status=QAStatus.REJECT, message=f"TRUNCATION_ERROR: Patient Body Truncation Detected (Anatomy exceeds FOV){slice_info}"))
-    elif metrics.get("accessory_truncation_detected", False) and not metrics.get("used_totalsegmentator", False):
-        slice_info = format_slices(metrics.get("accessory_truncated_slices", []))
-        flags.append(QAFlag(name=NAME, status=QAStatus.CONDITIONAL, message=f"Accessory / Positioning Device Truncated at FOV Edge (Non-Critical Body Anatomy){slice_info}"))
-    elif len(metrics.get("tolerated_truncated_slices", [])) > 0:
-        slice_info = format_slices(metrics.get("tolerated_truncated_slices", []))
-        flags.append(QAFlag(name=NAME, status=QAStatus.CONDITIONAL, message=f"Flared wingboard elbow clipping within clinical tolerance (<{cfg.lateral_tolerance_mm.lenient:g}mm){slice_info}"))
+    empty = metrics.get("empty_slices", [])
+    if empty:
+        flags.append(QAFlag(name=NAME, status=QAStatus.INFO, message=f"EMPTY_SLICE: {len(empty)} over-range air slice(s) bypassed{format_slices(empty)}"))
 
-    if len(metrics.get("empty_slices", [])) > 0:
-        slice_info = format_slices(metrics.get("empty_slices", []))
-        flags.append(QAFlag(name=NAME, status=QAStatus.SKIPPED, message=f"EMPTY_SLICE: Over-range air slices bypassed{slice_info}"))
+    spacing_var = metrics["slice_spacing_var"]
+    limit = cfg.max_slice_spacing_variation_mm
+    flags.append(QAFlag(
+        name=NAME,
+        status=QAStatus.REJECT if spacing_var > limit else QAStatus.ACCEPT,
+        message=f"Slice spacing variation {spacing_var:.2f} mm (limit {limit:g} mm)"))
 
-    if metrics["slice_spacing_var"] > cfg.max_slice_spacing_variation_mm:
-        flags.append(QAFlag(name=NAME, status=QAStatus.REJECT, message=f"Slice spacing variation too high ({metrics['slice_spacing_var']:.2f}mm)"))
+    flags.append(QAFlag(
+        name=NAME,
+        status=QAStatus.ACCEPT if metrics["monotonic_z"] else QAStatus.REJECT,
+        message="Slice positions monotonic" if metrics["monotonic_z"] else "Non-monotonic slice positions detected"))
 
-    if not metrics["monotonic_z"]:
-        flags.append(QAFlag(name=NAME, status=QAStatus.REJECT, message="Non-monotonic slice positions detected"))
+    flags.append(QAFlag(
+        name=NAME,
+        status=QAStatus.REJECT if metrics["duplicate_slices"] else QAStatus.ACCEPT,
+        message="Duplicate slice positions detected" if metrics["duplicate_slices"] else "No duplicate slice positions"))
 
-    if abs(metrics["gantry_tilt"]) > cfg.max_gantry_tilt_deg:
-        flags.append(QAFlag(name=NAME, status=QAStatus.CONDITIONAL, message=f"Gantry tilt ({metrics['gantry_tilt']}°) exceeds clinical limit"))
-
-    if metrics["duplicate_slices"]:
-        flags.append(QAFlag(name=NAME, status=QAStatus.REJECT, message="Duplicate slice positions detected"))
-
+    tilt = metrics["gantry_tilt"]
+    flags.append(QAFlag(
+        name=NAME,
+        status=QAStatus.CONDITIONAL if abs(tilt) > cfg.max_gantry_tilt_deg else QAStatus.ACCEPT,
+        message=f"Gantry tilt {tilt:g}° (limit {cfg.max_gantry_tilt_deg:g}°)"))
     return flags

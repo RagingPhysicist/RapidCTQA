@@ -9,9 +9,9 @@ from backend.models import QAResult, QAFlag
 from backend.qa_config import QAConfig, load_qa_config
 from backend.status import QAStatus, series_verdict
 from backend.utils import segment_patient_and_accessories
-from backend.agents import AGENTS
+from backend.agents import AGENTS, implants
 from backend.agents.base import SeriesContext, format_slices
-from backend.agents.alignment import determine_true_patient_roll
+from backend.agents.alignment import estimate_roll
 
 CT_IMAGE_STORAGE = '1.2.840.10008.5.1.4.1.1.2'
 RT_STRUCTURE_SET_STORAGE = '1.2.840.10008.5.1.4.1.1.481.3'
@@ -32,16 +32,14 @@ class QAEngine:
 
     @property
     def thresholds(self):
+        """Default thresholds (no protocol overrides applied)."""
         return self.config.thresholds
 
-    def _determine_true_patient_roll(self, pixel_array, hu_threshold=None, angular_resolution=None):
-        cfg = self.thresholds.alignment
-        overrides = {}
-        if hu_threshold is not None:
-            overrides["hu_floor"] = hu_threshold
-        if angular_resolution is not None:
-            overrides["angular_step_deg"] = angular_resolution
-        return determine_true_patient_roll(pixel_array, cfg.model_copy(update=overrides))
+    def thresholds_for(self, protocol: Optional[str]):
+        return self.config.thresholds_for(protocol)
+
+    def _determine_true_patient_roll(self, pixel_array, body_mask=None):
+        return estimate_roll(pixel_array, self.thresholds.alignment, body_mask=body_mask)
 
     def _extract_reference_point(self, rtss: pydicom.Dataset) -> Optional[Dict[str, Any]]:
         """Extract reference point or isocenter coordinates from RT Structure Set."""
@@ -128,6 +126,9 @@ class QAEngine:
         hu_volume = pixel_data * rescale_slope + rescale_intercept
 
         pixel_spacing = (float(datasets[0].PixelSpacing[0]), float(datasets[0].PixelSpacing[1]))
+        z_steps = np.diff(sorted(float(ds.ImagePositionPatient[2]) for ds in datasets))
+        z_steps = z_steps[z_steps > 0]
+        slice_spacing_mm = float(np.median(z_steps)) if z_steps.size else float(datasets[0].SliceThickness)
         voxel_vol_cc = (pixel_spacing[0] * pixel_spacing[1] * float(datasets[0].SliceThickness)) / 1000.0
 
         # Shared masks: filled patient body (no couch / devices) and accessories.
@@ -152,8 +153,9 @@ class QAEngine:
             interior_mask=patient_body_mask,
             accessory_table_mask=accessory_table_mask,
             empty_slices=empty_slices,
-            thresholds=self.thresholds,
+            thresholds=self.thresholds_for(protocol),
             used_totalsegmentator=used_totalsegmentator,
+            slice_spacing_mm=slice_spacing_mm,
         )
 
     def _segmentation_service_for(self, datasets: List[pydicom.Dataset]):
@@ -193,16 +195,47 @@ class QAEngine:
 
     def _compute_metrics(self, datasets: List[pydicom.Dataset], protocol: str = "Unknown") -> Dict[str, Any]:
         ctx = self._build_context(datasets, protocol)
-        metrics: Dict[str, Any] = {}
+        metrics: Dict[str, Any] = {"protocol_overrides_applied": self.config.matching_overrides(protocol)}
         for agent in AGENTS:
             metrics.update(agent.compute(ctx))
         return metrics
+
+    def with_metal_policy(self, result: QAResult, reference_uid: Optional[str]) -> QAResult:
+        """Result with ImplantAuditor flags for a 4DCT phase.
+
+        ``reference_uid`` set and different from this series: metal is
+        evaluated once per group on that reference phase, so this phase
+        reports a single INFO flag. ``None``: the normal per-class flags.
+        The verdict is recomputed; metrics are kept.
+        """
+        defer = reference_uid is not None and reference_uid != result.series_uid
+        metrics = dict(result.metrics)
+        if defer:
+            metrics["metal_evaluated_on"] = reference_uid
+            metal_flags = [QAFlag(name=implants.NAME, status=QAStatus.INFO, message=(
+                f"Metal evaluated once per 4DCT group on reference phase {reference_uid}"))]
+        else:
+            metrics.pop("metal_evaluated_on", None)
+            if "metal_internal_cc" not in metrics:
+                return result  # e.g. "No valid CT image slices" result
+            metal_flags = implants.evaluate(metrics, self.thresholds_for(metrics.get("protocol")))
+
+        others = [f for f in result.flags if f.name != implants.NAME]
+        first = next((i for i, f in enumerate(result.flags) if f.name == implants.NAME), len(others))
+        flags = others[:first] + metal_flags + others[first:]
+        return result.model_copy(update={
+            "metrics": metrics,
+            "flags": flags,
+            "status": series_verdict(f.status for f in flags),
+        })
 
     def _format_slices(self, slices: List[int]) -> str:
         return format_slices(slices)
 
     def _evaluate_rules(self, metrics: Dict[str, Any]) -> List[QAFlag]:
+        """One flag per check, every time. Only CONDITIONAL / REJECT flags are actionable."""
+        thresholds = self.thresholds_for(metrics.get("protocol"))
         flags: List[QAFlag] = []
         for agent in AGENTS:
-            flags.extend(agent.evaluate(metrics, self.thresholds))
+            flags.extend(agent.evaluate(metrics, thresholds))
         return flags

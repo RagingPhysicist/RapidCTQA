@@ -1,20 +1,24 @@
 # QA Agents: Technical Details
 
-RapidCTQA uses a modular agent-based architecture to evaluate DICOM series. Each agent lives in `backend/agents/<agent>.py` and has a `compute` step (metrics) and an `evaluate` step (flags). Every limit below is a key in `ctqa.yaml` (shown in brackets); the numbers are the shipped defaults.
+RapidCTQA uses a modular agent-based architecture to evaluate DICOM series. Each agent lives in `backend/agents/<agent>.py` and has a `compute` step (metrics) and an `evaluate` step (flags). Every limit below is a key in `ctqa.yaml` (shown in brackets); the numbers are the shipped defaults, and `protocol_overrides` can change them per protocol.
 
 **Body mask**: when TotalSegmentator is installed, the engine runs its `body` task on each series and uses that mask for all agents; otherwise (or if it fails) it falls back to the rule-based segmentation that excludes the couch. With the TotalSegmentator mask, accessory/couch truncation is not reported (`metrics.used_totalsegmentator`).
 
-Each flag is `ACCEPT`, `CONDITIONAL`, `REJECT` or `SKIPPED` (informational). The series verdict is `REJECT` if any flag rejects, otherwise `CONDITIONAL` if any flag needs review, otherwise `ACCEPT`. Only `ACCEPT` series are exported to the TPS automatically.
+Every check emits exactly one flag per series, with the measured value and limit in its message: `ACCEPT`, `INFO` (reported, not actionable), `CONDITIONAL`, `REJECT`, or `SKIPPED` (not applicable). The series verdict is `REJECT` if any flag rejects, otherwise `CONDITIONAL` if any flag needs review, otherwise `ACCEPT`; `INFO` never escalates. Only `ACCEPT` series are exported to the TPS automatically, and only `CONDITIONAL` / `REJECT` results go to the problem log.
 
 ## 1. GeometryGuardian
 Ensures that the physical geometry of the scan is correct and that the patient is fully captured.
 - **Truncation Detection**: Checks whether the filled patient body mask touches the outermost ring of the image matrix [`geometry.edge_buffer_px`: 3 px]; fewer than [`geometry.min_edge_pixels`: 5] contact pixels are ignored.
-  - Contact in the anterior or posterior sector is always a `TRUNCATION_ERROR` (`REJECT`).
-  - Lateral contact is tolerated up to a protocol-dependent depth [`geometry.lateral_tolerance_mm`]: 15 mm for Thorax/Chest/Breast protocols, 5 mm for Head & Neck, 0 mm otherwise. Tolerated clipping is `CONDITIONAL`.
-  - Couch / accessory contact is `CONDITIONAL`; on lenient protocols, accessory clipping deeper than [`geometry.accessory_lateral_tolerance_mm`: 15 mm] escalates to `TRUNCATION_ERROR`.
+  - Contact in the anterior or posterior sector (outside 315°–45° and 135°–225° around the image centre) is always a `TRUNCATION_ERROR` (`REJECT`), on any number of slices.
+  - Lateral-only contact: the **torso core** is the body mask after a morphological opening with a disk of [`geometry.torso_core_opening_mm`: 30 mm] diameter, keeping the largest component. If the core touches the border, it is lateral torso truncation: `CONDITIONAL` while its z-extent (affected slices × slice spacing) is at most [`geometry.max_lateral_truncation_z_mm`: 12 mm], otherwise `TRUNCATION_ERROR` (`REJECT`).
+  - If the core does not touch the border, the contact is an arm/elbow: `INFO`.
+  - Couch / accessory contact only: `INFO` (not reported with a TotalSegmentator mask).
+  - The flag reports the maximum contact length along the border (mm), the z-extent and the affected slices. Validated empty slices are skipped.
 - **Slice Spacing**: Variation in slice spacing above [`geometry.max_slice_spacing_variation_mm`: 1.0 mm] is a rejection.
 - **Monotonicity**: Verifies that slice positions ($z$-axis) strictly increase or decrease.
+- **Duplicates**: Duplicate slice positions are a rejection.
 - **Gantry Tilt**: Tilt above [`geometry.max_gantry_tilt_deg`: 1.0°] is `CONDITIONAL`.
+- **Empty Slices**: Over-range air slices are listed as `INFO` (`EMPTY_SLICE`).
 
 ## 2. NoiseWhisperer
 Analyzes the technical quality of the image acquisition.
@@ -25,7 +29,7 @@ Analyzes the technical quality of the image acquisition.
 Validates Hounsfield Unit (HU) accuracy using internal biological markers.
 - **HU Consistency**: Median of body voxels in [`fluid.search_range_hu`: 0–30 HU] (isolates fluid/urine from dense soft tissue), falling back to [`fluid.fallback_search_range_hu`: 0–50 HU] when none are found.
 - **Evaluation**: Median inside [`fluid.optimal_range_hu`: 0–40 HU] passes, up to [`fluid.conditional_max_hu`: 50 HU] is `CONDITIONAL`, anything else is `REJECT` (calibration drift).
-- **IV Contrast**: When `ContrastBolusAgent` is set the check is `SKIPPED`.
+- **IV Contrast**: When `ContrastBolusAgent` is set the check is `SKIPPED` (also when no fluid-range voxels exist).
 - **Metadata**: Ensures the `RescaleSlope` is non-zero.
 
 ## 4. CavityScout
@@ -33,14 +37,18 @@ Detects air pockets within the patient, which can significantly affect dose calc
 - **Scope**: Pelvis / abdomen scans only (protocol, study description or body part matching [`gas.pelvis_keywords`]), inferior half of the series.
 - **Detection**: Internal air (< -800 HU, fully enclosed by tissue) inside the patient mask, excluding the couch interface [`gas.couch_exclusion_mm`: 15 mm] and components that leak out of the body on adjacent slices.
 - **Thresholds**:
-    - **Moderate** (`CONDITIONAL`): volume > [`gas.conditional_cc`: 15 cc].
-    - **Excessive** (`REJECT`): volume > [`gas.reject_cc`: 50 cc].
-    - **Segmentation leak** (`REJECT`): volume > [`gas.leak_cc`: 100 cc].
+    - **Physiological** (`INFO`): volume below [`gas.info_max_cc`: 30 cc]; no gas is `ACCEPT`.
+    - **Moderate / large** (`CONDITIONAL`): from 30 cc; "large" above [`gas.large_cc`: 75 cc].
+    - **Excessive** (`REJECT`): volume above [`gas.reject_cc`: 150 cc]. The shipped `ABD` protocol override sets it to `null`, so abdomen scans are never rejected on volume.
+- **Body-mask sanity** (replaces the old `SEGMENTATION_LEAK` reject): if gas exceeds [`gas.max_gas_body_fraction`: 10%] of the body volume in the evaluated slices, or there is no body there, the mask is suspect. The result is a `CONDITIONAL` `BODY_MASK_SANITY` flag, and the gas volume is reported as unreliable `INFO`.
 - **Reporting**: Identifies specific slice ranges containing gas.
 
 ## 5. ImplantAuditor
 Detects and classifies high-density metallic objects.
-- **Threshold**: Detects voxels above [`implants.metal_threshold_hu`: 3000 HU]. Each class is `CONDITIONAL` when its volume exceeds [`implants.max_volume_cc`: 0.2 cc].
+- **Threshold**: Detects voxels above [`implants.metal_threshold_hu`: 3000 HU].
+- **Per-class tiers**: none `ACCEPT`; below the class limit `INFO`; at or above `CONDITIONAL`. Limits: internal [`implants.internal_info_max_cc`: 2 cc], surface [`implants.surface_info_max_cc`: 10 cc], external [`implants.external_info_max_cc`: 5 cc].
+- **Pelvis**: on scans matching [`implants.pelvis_keywords`], internal metal of [`implants.pelvis_internal_conditional_cc`: 5 cc] or more is always `CONDITIONAL`, even if a protocol override raised the internal limit.
+- **4DCT**: metal is evaluated once per group, on the reference phase (the one used for segmentation). The other phases carry a single `INFO` flag pointing to it, and their verdict, log entry and report are updated when the group is detected.
 - **Classification Strategy**:
     - **Body Masking**: Identifies the patient as the largest connected component.
     - **Interior Buffer**: Erodes the filled patient mask by [`implants.internal_margin_mm`: 10 mm] to define the "internal" volume.
@@ -51,14 +59,18 @@ Detects and classifies high-density metallic objects.
 
 ## 6. AlignmentAuditor
 Detects if the patient is rotated relative to the scanner's coordinate system.
-- **Roll Calculation**: Quantifies precise patient roll by locating the true axis of bilateral reflection symmetry on the central slice of the series, bypassing structural inertia limitations and segmentation noise.
-  - **Radon Transform Sweep**: Performs a fine-grained Radon transform sinogram sweep around the vertical axis ($80.0^{\circ}$ to $100.0^{\circ}$) with an angular step resolution (default: $0.1^{\circ}$) and Hounsfield Unit floor threshold (default: -300 HU) to isolate the structural mass from background noise.
-  - **Symmetry Confidence**: Computes the normalized cross-correlation between each 1D projection profile and its flipped/mirrored counterpart.
-  - **Confidence Filter**: Slices whose best cross-correlation is below [`alignment.symmetry_gate`: 0.90] are `SKIPPED`.
-- **Evaluation & Alerts**: `CONDITIONAL` (`ROLL_ALERT`) if the roll exceeds [`alignment.max_allowable_tilt_deg`: 1.5°] and the symmetry confidence is above [`alignment.min_confidence`: 0.95].
+- **Roll Calculation** (central slice, mirror symmetry):
+  1. Take the largest connected component of the body mask.
+  2. Weight = clip(HU, [`alignment.hu_floor`: -300], [`alignment.hu_ceiling`: 300]) − floor, with background 0.
+  3. Shift the weighted centroid to the image centre and downsample by [`alignment.downsample`: 4].
+  4. Mirror left-right and rotate the mirror image over ±[`alignment.search_range_deg`: 30°] in [`alignment.step_deg`: 0.25°] steps, keeping the angle with the highest correlation to the original (refined by a parabolic fit). A body rolled by θ has a mirror rolled by −θ, so roll = best angle / 2.
+  - **Sign convention** (unchanged): positive roll = clockwise as displayed.
+  - Unlike the previous Radon sweep, the estimate does not depend on where the patient lies in the FOV. A centred, unrotated body reads 0°, where the old sweep read its +10° limit.
+- **Reliability**: correlation below [`alignment.min_correlation`: 0.90], or a best angle within [`alignment.edge_margin_deg`: 0.5°] of the search limit, gives an "unreliable" `INFO` instead of an alert.
+- **Evaluation**: `|roll|` above [`alignment.info_deg`: 1.5°] is `INFO`, above [`alignment.conditional_deg`: 3°] `CONDITIONAL` (`ROLL_ALERT`).
 
 ## 7. Integrity Agent
 General oversight and protocol validation.
 - **Pediatric Check**: Parses `PatientAge` (Age String VR) and compares it with [`integrity.adult_age_years`: 18] against "(Child)" or "(Adult)" markers in the `StudyDescription` or `ProtocolName`. A mismatch is `REJECT`.
-- **Slice Resolution**: `CONDITIONAL` above [`slice_thickness.preferred_max_mm`: 3.0 mm], `REJECT` above [`slice_thickness.absolute_max_mm`: 5.0 mm].
+- **Slice Thickness**: `REJECT` above [`slice_thickness.absolute_max_mm`: 5.0 mm]. Otherwise only deviation from the protocol's nominal is flagged: `CONDITIONAL` when |measured − [`slice_thickness.nominal_mm`]| > [`slice_thickness.tolerance_mm`: 0.5 mm]. The nominal is `null` by default (no warning) and is set per protocol through `protocol_overrides`.
 - **Series Count**: Rejects series with fewer than [`integrity.min_slice_count`: 5] slices.

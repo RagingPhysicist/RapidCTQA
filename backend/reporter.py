@@ -7,6 +7,7 @@ from backend.status import QAStatus, try_normalize_status
 STATUS_COLOURS = {
     QAStatus.ACCEPT: (16, 185, 129),
     QAStatus.CONDITIONAL: (245, 158, 11),
+    QAStatus.INFO: (59, 130, 246),
     QAStatus.SKIPPED: (100, 116, 139),
 }
 REJECT_COLOUR = (239, 68, 68)
@@ -69,6 +70,14 @@ def format_slices(slices) -> str:
         ranges.append(f"{start}-{end}")
 
     return f"Slices {', '.join(ranges)}"
+
+def _roll_text(metrics) -> str:
+    if "roll_deg" not in metrics:
+        return "n/a"
+    if not metrics.get("roll_reliable", True):
+        return "unreliable"
+    return f"{metrics['roll_deg']:+.1f}°"
+
 
 def generate_pdf_report(result: QAResult, output_path: str):
     pdf = QAPDFReport()
@@ -160,9 +169,11 @@ def generate_pdf_report(result: QAResult, output_path: str):
         ("Internal Metal Vol.", f"{result.metrics.get('metal_internal_cc', 0.0):.2f} cc"),
         ("Surface Metal Vol.", f"{result.metrics.get('metal_surface_cc', 0.0):.2f} cc"),
         ("External Metal Vol.", f"{result.metrics.get('metal_external_cc', 0.0):.2f} cc"),
-        ("Max Patient Rotation", f"{result.metrics.get('max_tilt_deg', 0.0):.1f}°"),
+        ("Patient Roll", _roll_text(result.metrics)),
         ("Truncation Detected", "Yes" if result.metrics.get("truncation_detected") else "No"),
         ("Truncation Error Detected", "Yes" if result.metrics.get("truncation_error") else "No"),
+        ("Lateral Torso Truncation Extent", f"{result.metrics.get('lateral_truncation_z_extent_mm', 0.0):.1f} mm"),
+        ("Max FOV Contact Length", f"{result.metrics.get('max_contact_length_mm', 0.0):.0f} mm"),
         ("Tolerated Truncation Detected", "Yes" if result.metrics.get("tolerated_truncated_slices") else "No"),
         ("Accessory Truncation Detected", "Yes" if result.metrics.get("accessory_truncation_detected") else "No"),
         ("Empty Slices Detected", "Yes" if result.metrics.get("empty_slices") else "No"),
@@ -187,7 +198,9 @@ def generate_pdf_report(result: QAResult, output_path: str):
     # Affected Slice Locations Section
     slice_metrics = [
         ("Truncated Slices", result.metrics.get("truncated_slices")),
-        ("Truncated Slices (Tolerated)", result.metrics.get("tolerated_truncated_slices")),
+        ("Anterior/Posterior Truncation", result.metrics.get("anterior_posterior_truncated_slices")),
+        ("Lateral Torso Truncation", result.metrics.get("lateral_torso_truncated_slices")),
+        ("Arm/Elbow at FOV Edge", result.metrics.get("tolerated_truncated_slices")),
         ("Accessory Truncated Slices", result.metrics.get("accessory_truncated_slices")),
         ("Empty Slices", result.metrics.get("empty_slices")),
         ("Tilted/Rotated Slices", result.metrics.get("tilted_slices")),
