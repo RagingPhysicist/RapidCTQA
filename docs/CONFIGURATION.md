@@ -35,6 +35,11 @@ Incoming objects whose `SeriesInstanceUID` or `SOPInstanceUID` is not a plain DI
   ```
 - `retention_days`: At startup, series folders not modified within this many days are deleted (`1` keeps today's series only, `0` disables cleanup). Only folders whose name is a DICOM UID are ever touched.
 
+Besides the DICOM files, each series folder may contain `qa_result.json` and, after body segmentation, `segmentations/<task>/` with the TotalSegmentator NIfTI masks. It also holds `body_dicom.npy`: the mask resampled to DICOM voxel space, about 1 byte per voxel (for example 75 MB for 300 slices of 512×512). It is rebuilt automatically when the NIfTI is newer or the series' slice count or matrix changes, and is safe to delete.
+
+### Slice viewer
+The viewer caches each series' file list and geometry, and recently viewed decoded slices (about 160), in memory. Slice images are rendered on a dedicated thread pool, separate from QA analysis. Responses carry an `ETag` (series, slice, window, overlays, mask and file versions) and `Cache-Control: private, max-age=3600`, so revisited slices come from the browser cache; a re-segmentation changes the ETag. Each response has a `Server-Timing` header (`hu`, `mask`, `render`, `total` in ms), and the same line is logged at DEBUG level by `backend.routers.viewer`.
+
 ### `security`
 - `allowed_clients`: IP addresses / CIDR ranges allowed to use the dashboard and API. Default: loopback only.
 - `allowed_origins`: Additional browser origins allowed to call the API cross-site. The dashboard itself needs none.

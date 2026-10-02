@@ -329,6 +329,7 @@ const cockpitState = {
 };
 
 async function launchCockpit(seriesUid) {
+  _cancelSliceLoads();
   cockpitState.seriesUid = seriesUid;
   cockpitState.sliceIndex = 0;
   cockpitState.zoom = 1.0;
@@ -428,6 +429,7 @@ async function launchCockpit(seriesUid) {
 }
 
 function closeCockpit() {
+  _cancelSliceLoads();
   document.getElementById('cockpit-overlay').classList.remove('open');
   const img = document.getElementById('cockpit-image');
   if (img.src && img.src.startsWith('blob:')) URL.revokeObjectURL(img.src);
@@ -445,36 +447,141 @@ function jumpToSlice(sliceNum) {
   }
 }
 
-function refreshCockpitSlice() {
-  const { seriesUid, sliceIndex } = cockpitState;
-  if (!seriesUid) return;
+// ── Slice loading ────────────────────────────────────────────────
+// Navigation updates the label/slider at once; the image request is
+// coalesced to one per animation frame (only the latest index is fetched),
+// stale responses are aborted or ignored, and neighbouring slices are
+// prefetched into the browser cache (same URL, served with Cache-Control).
+const PREFETCH_AHEAD = 4;
+const PREFETCH_BEHIND = 2;
+const SPINNER_DELAY_MS = 150;
 
+const sliceLoader = {
+  framePending: false,
+  token: 0,                 // increments per load; late responses with an old token are dropped
+  controller: null,         // AbortController of the in-flight displayed slice
+  prefetchController: null, // AbortController of the current prefetch batch
+  lastIndex: null,
+  direction: 1,
+  settingsKey: '',
+};
+
+function _sliceSettings() {
   const ww = document.getElementById('cockpit-ww').value;
   const wl = document.getElementById('cockpit-wl').value;
   const metal = document.getElementById('cockpit-metal-toggle').checked;
   const mask = document.getElementById('cockpit-mask-toggle').checked;
+  return { ww, wl, metal, mask, key: `${ww}|${wl}|${metal}|${mask}` };
+}
 
-  // Update slice label
+function _sliceUrl(seriesUid, index, s) {
+  return `${API_BASE}/viewer/${encodeURIComponent(seriesUid)}/slice/${index}?ww=${s.ww}&wl=${s.wl}&metal=${s.metal}&mask=${s.mask}`;
+}
+
+function _cancelPrefetch() {
+  if (sliceLoader.prefetchController) sliceLoader.prefetchController.abort();
+  sliceLoader.prefetchController = null;
+}
+
+function _cancelSliceLoads() {
+  sliceLoader.token++;
+  if (sliceLoader.controller) sliceLoader.controller.abort();
+  sliceLoader.controller = null;
+  _cancelPrefetch();
+  sliceLoader.lastIndex = null;
+}
+
+function refreshCockpitSlice() {
+  const { seriesUid, sliceIndex } = cockpitState;
+  if (!seriesUid) return;
+
   document.getElementById('cockpit-slice-label').textContent =
     `Slice ${sliceIndex + 1} / ${cockpitState.sliceCount}`;
-
-  // Sync nav slider
   document.getElementById('cockpit-nav-slider').value = sliceIndex;
 
-  const url = `${API_BASE}/viewer/${encodeURIComponent(seriesUid)}/slice/${sliceIndex}?ww=${ww}&wl=${wl}&metal=${metal}&mask=${mask}`;
-  const loading = document.getElementById('cockpit-loading');
-  loading.classList.add('visible');
+  if (!sliceLoader.framePending) {
+    sliceLoader.framePending = true;
+    requestAnimationFrame(_loadCurrentSlice);
+  }
+}
 
-  const img = document.getElementById('cockpit-image');
-  // Use a temporary Image to avoid flicker
-  const tmp = new window.Image();
-  tmp.onload = () => {
-    if (img.src && img.src.startsWith('blob:')) URL.revokeObjectURL(img.src);
-    img.src = tmp.src;
-    loading.classList.remove('visible');
-  };
-  tmp.onerror = () => loading.classList.remove('visible');
-  tmp.src = url;
+async function _loadCurrentSlice() {
+  sliceLoader.framePending = false;
+  const { seriesUid, sliceIndex } = cockpitState;
+  if (!seriesUid) return;
+  const settings = _sliceSettings();
+
+  // Prefetches for the old direction or old W/L/mask settings are useless now
+  if (sliceLoader.lastIndex !== null && sliceIndex !== sliceLoader.lastIndex) {
+    const direction = Math.sign(sliceIndex - sliceLoader.lastIndex);
+    if (direction !== sliceLoader.direction) {
+      sliceLoader.direction = direction;
+      _cancelPrefetch();
+    }
+  }
+  if (settings.key !== sliceLoader.settingsKey) {
+    sliceLoader.settingsKey = settings.key;
+    _cancelPrefetch();
+  }
+  sliceLoader.lastIndex = sliceIndex;
+
+  const token = ++sliceLoader.token;
+  if (sliceLoader.controller) sliceLoader.controller.abort();
+  const controller = new AbortController();
+  sliceLoader.controller = controller;
+
+  const loading = document.getElementById('cockpit-loading');
+  const spinnerTimer = setTimeout(() => {
+    if (token === sliceLoader.token) loading.classList.add('visible');
+  }, SPINNER_DELAY_MS);
+
+  try {
+    const res = await fetch(_sliceUrl(seriesUid, sliceIndex, settings), { signal: controller.signal });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const blob = await res.blob();
+    if (token !== sliceLoader.token) return;  // a newer slice was requested meanwhile
+
+    // Decode off-screen first so the visible image never flickers
+    const objectUrl = URL.createObjectURL(blob);
+    const tmp = new window.Image();
+    tmp.src = objectUrl;
+    try { await tmp.decode(); } catch (e) { /* show it anyway */ }
+    if (token !== sliceLoader.token) { URL.revokeObjectURL(objectUrl); return; }
+
+    const img = document.getElementById('cockpit-image');
+    const previous = img.src;
+    img.src = objectUrl;
+    if (previous && previous.startsWith('blob:')) URL.revokeObjectURL(previous);
+
+    _prefetchAround(seriesUid, sliceIndex, settings);
+  } catch (err) {
+    if (err.name !== 'AbortError') console.error('Slice load failed:', err);
+  } finally {
+    clearTimeout(spinnerTimer);
+    if (token === sliceLoader.token) loading.classList.remove('visible');
+  }
+}
+
+async function _prefetchAround(seriesUid, index, settings) {
+  _cancelPrefetch();
+  const controller = new AbortController();
+  sliceLoader.prefetchController = controller;
+  const dir = sliceLoader.direction || 1;
+  const targets = [];
+  for (let k = 1; k <= PREFETCH_AHEAD; k++) targets.push(index + dir * k);
+  for (let k = 1; k <= PREFETCH_BEHIND; k++) targets.push(index - dir * k);
+
+  for (const i of targets) {
+    if (controller.signal.aborted) return;
+    if (i < 0 || i >= cockpitState.sliceCount) continue;
+    try {
+      // Same URL as a real load, so the browser cache serves the later visit
+      const res = await fetch(_sliceUrl(seriesUid, i, settings), { signal: controller.signal, priority: 'low' });
+      await res.arrayBuffer();
+    } catch (err) {
+      if (err.name === 'AbortError') return;
+    }
+  }
 }
 
 function onCockpitNavSlider() {

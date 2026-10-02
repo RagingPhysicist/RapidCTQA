@@ -54,6 +54,7 @@ pytest
 - `backend/test_implant_auditor.py`: Tests for metal detection logic.
 - `backend/test_dicom_sender.py`: Tests for DICOM networking/egress.
 - `backend/test_refined_pca.py`: Tests for advanced geometry/alignment logic.
+- `backend/test_viewer_performance.py`: DICOM-space mask cache (equality with the previous resampling, invalidation, concurrent build, single-slice fallback) and the slice endpoint (no NIfTI/DICOM-header access when warm, identical PNG output, ETag).
 - `backend/test_gas_cleft.py`: Gas candidate cleaning (cleft slit, inter-thigh pocket, couch zone, TotalSegmentator vs rule-based mask).
 - `backend/test_screen_flags.py`: On-screen flag filtering, PDF sections and problem-log issues.
 - `backend/test_alert_fatigue.py`: INFO status, one flag per check, protocol overrides, metal/gas/thickness tiers, truncation classes, roll phantoms and the 4DCT metal policy.
