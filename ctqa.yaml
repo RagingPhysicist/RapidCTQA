@@ -61,6 +61,15 @@ thresholds:
     max_gas_body_fraction: 0.10           # body-mask sanity: more gas than this share of the body -> CONDITIONAL, gas value unreliable
     couch_exclusion_mm: 15                # ignore gas this close to the posterior skin/couch interface
     pelvis_keywords: [PELVIS, PROSTATE, ABD, ABDOMEN, RECTUM, GYN, PELVIC]
+    # Candidate cleaning, identical for TotalSegmentator and rule-based body masks.
+    # Rejected air is reported in metrics.gas_components / gas_rejected_cc
+    # (tools/gas_debug.py prints them for tuning).
+    air_threshold_hu: -500                # air = HU below this
+    min_thickness_mm: 4                   # thinner components (sheets, slits) -> sheet_like
+    min_depth_mm: 15                      # 90th-percentile depth from skin / exterior air below -> too_shallow
+    skin_hu: -200                         # skin silhouette for the cleft test
+    cleft_closing_mm: 5                   # closing that ignores skin texture in the cleft test
+    cleft_fraction: 0.5                   # share of a component inside a skin concavity -> cleft
 
   implants:                               # ImplantAuditor (per class: none ACCEPT, below limit INFO, at/above CONDITIONAL)
     metal_threshold_hu: 3000              # voxels above this are metal (also used for the viewer overlay)
@@ -82,6 +91,12 @@ thresholds:
     hu_floor: -300
     hu_ceiling: 300
     downsample: 4
+
+# On-screen report (dashboard, viewer, desktop cockpit). The PDF and the stored
+# qa_result.json always list every check; CONDITIONAL/REJECT are never hidden.
+display:
+  screen_hidden_statuses: [PASS, ACCEPT, INFO]
+  show_passed_summary: true               # "N checks passed - full list in PDF"
 
 # Per-protocol overrides. Each entry whose "match" occurs in ProtocolName
 # (case-insensitive substring) is merged over the thresholds above, in order;

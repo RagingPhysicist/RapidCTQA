@@ -35,13 +35,19 @@ Validates Hounsfield Unit (HU) accuracy using internal biological markers.
 ## 4. CavityScout
 Detects air pockets within the patient, which can significantly affect dose calculation in radiotherapy.
 - **Scope**: Pelvis / abdomen scans only (protocol, study description or body part matching [`gas.pelvis_keywords`]), inferior half of the series.
-- **Detection**: Internal air (< -800 HU, fully enclosed by tissue) inside the patient mask, excluding the couch interface [`gas.couch_exclusion_mm`: 15 mm] and components that leak out of the body on adjacent slices.
+- **Candidates**: air (HU below [`gas.air_threshold_hu`: -500]) inside the patient mask, excluding the couch interface (bottom [`gas.couch_exclusion_mm`: 15 mm] of the mask on each slice). The same cleaning runs whether the mask comes from TotalSegmentator (which includes air between the thighs and in the gluteal cleft) or from the rule-based segmentation. Each 3D candidate component (6-connectivity) is checked in this order:
+    1. `exterior_connected`: part of air that touches the in-plane image border, or touches the first/last slice and the couch, anywhere in the volume. A pocket that is closed on some slices but open on others is outside air.
+    2. `sheet_like`: thickness (2 × the component's maximum distance transform) below [`gas.min_thickness_mm`: 4 mm].
+    3. `too_shallow`: 90th-percentile in-plane depth from the nearest non-body or exterior-air voxel below [`gas.min_depth_mm`: 15 mm].
+    4. `cleft`: at least [`gas.cleft_fraction`: 50%] of it lies in a skin concavity. The concavity is the convex hull of the skin silhouette (HU ≥ [`gas.skin_hu`: -200], holes filled) minus the silhouette's [`gas.cleft_closing_mm`: 5 mm] closing. This catches a bay sealed only by partial-volume voxels; enclosed rectal gas lies inside the silhouette.
+    5. Otherwise `kept`: counted as gas.
+- **Diagnostics**: `metrics.gas_rejected_cc` (also in the PDF), and `metrics.gas_components`, which lists the 50 largest components with volume, centroid (slice / y / x), depth, thickness and reason. `python tools/gas_debug.py <series_dir>` prints them for tuning.
 - **Thresholds**:
     - **Physiological** (`INFO`): volume below [`gas.info_max_cc`: 30 cc]; no gas is `ACCEPT`.
     - **Moderate / large** (`CONDITIONAL`): from 30 cc; "large" above [`gas.large_cc`: 75 cc].
     - **Excessive** (`REJECT`): volume above [`gas.reject_cc`: 150 cc]. The shipped `ABD` protocol override sets it to `null`, so abdomen scans are never rejected on volume.
 - **Body-mask sanity** (replaces the old `SEGMENTATION_LEAK` reject): if gas exceeds [`gas.max_gas_body_fraction`: 10%] of the body volume in the evaluated slices, or there is no body there, the mask is suspect. The result is a `CONDITIONAL` `BODY_MASK_SANITY` flag, and the gas volume is reported as unreliable `INFO`.
-- **Reporting**: Identifies specific slice ranges containing gas.
+- **Reporting**: The slice ranges in the flag come from the kept components only.
 
 ## 5. ImplantAuditor
 Detects and classifies high-density metallic objects.

@@ -24,6 +24,13 @@ class QAResult(_StatusModel):
     metrics: Dict[str, Any]
     flags: List[QAFlag]
 
+class ScreenQAResult(QAResult):
+    """QAResult as shown on screen: only flags that are not hidden by
+    ctqa.yaml display.screen_hidden_statuses (passing checks are in the PDF)."""
+    passed_checks: int = 0
+    show_passed_summary: bool = True
+
+
 class StudySummary(_StatusModel):
     series_uid: str
     patient_name: Optional[str] = "Unknown"

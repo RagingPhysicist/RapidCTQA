@@ -5,9 +5,9 @@ import numpy as np
 from concurrent.futures import ThreadPoolExecutor
 from typing import List, Dict, Any, Optional, Tuple
 
-from backend.models import QAResult, QAFlag
+from backend.models import QAResult, QAFlag, ScreenQAResult
 from backend.qa_config import QAConfig, load_qa_config
-from backend.status import QAStatus, series_verdict
+from backend.status import QAStatus, screen_flags, series_verdict
 from backend.utils import segment_patient_and_accessories
 from backend.agents import AGENTS, implants
 from backend.agents.base import SeriesContext, format_slices
@@ -228,6 +228,18 @@ class QAEngine:
             "flags": flags,
             "status": series_verdict(f.status for f in flags),
         })
+
+    def screen_view(self, result: QAResult) -> ScreenQAResult:
+        """Result for on-screen display: hidden (passing) checks are left out and
+        counted in ``passed_checks``. The PDF uses the full result."""
+        display = self.config.display
+        visible = screen_flags(result.flags, display.hidden_statuses)
+        return ScreenQAResult(
+            **result.model_dump(exclude={"flags"}),
+            flags=visible,
+            passed_checks=len(result.flags) - len(visible),
+            show_passed_summary=display.show_passed_summary,
+        )
 
     def _format_slices(self, slices: List[int]) -> str:
         return format_slices(slices)

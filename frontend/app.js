@@ -27,9 +27,26 @@ function jsArg(value) {
 // Status values: ACCEPT, CONDITIONAL, REJECT, INFO, SKIPPED, PENDING, INGESTING.
 const FLAG_ORDER = { REJECT: 0, CONDITIONAL: 1, INFO: 2, ACCEPT: 3, SKIPPED: 4 };
 
-// Every check reports a flag; show actionable findings first.
+// The API sends only on-screen flags (findings needing attention, plus muted
+// SKIPPED checks); passing checks are counted in passed_checks and listed in the PDF.
 function sortFlags(flags) {
   return [...(flags || [])].sort((a, b) => (FLAG_ORDER[a.status] ?? 9) - (FLAG_ORDER[b.status] ?? 9));
+}
+
+function hasAttentionFlags(flags) {
+  return (flags || []).some(f => f.status === 'REJECT' || f.status === 'CONDITIONAL');
+}
+
+// "No issues detected." when nothing needs attention, plus one muted
+// "N checks passed" line (ctqa.yaml display.show_passed_summary).
+function flagsFooterHtml(data, small = false) {
+  const size = small ? 'font-size:0.8rem;' : '';
+  let html = hasAttentionFlags(data.flags) ? '' : `<p style="${size}color: var(--text-muted);">No issues detected.</p>`;
+  const passed = data.passed_checks || 0;
+  if (data.show_passed_summary !== false && passed > 0) {
+    html += `<p class="passed-summary" style="${size}">${passed} check${passed === 1 ? '' : 's'} passed - full list in PDF</p>`;
+  }
+  return html;
 }
 
 function statusKey(status) {
@@ -276,7 +293,7 @@ async function viewStudy(seriesUid) {
     title.textContent = `QA Report: ${result.patient_name}`;
     
     let flagsHtml = sortFlags(result.flags).map(flag => `
-      <div class="flag-item">
+      <div class="flag-item${flag.status === 'SKIPPED' ? ' flag-muted' : ''}">
         <div class="flag-icon" style="background: var(--${statusKey(flag.status)})"></div>
         <div>
           <div style="font-weight: 600;">${esc(flag.name)}</div>
@@ -306,7 +323,7 @@ async function viewStudy(seriesUid) {
         </div>
         <div>
           <h3 style="margin-bottom: 1rem;">Agent Findings</h3>
-          ${flagsHtml || '<p style="color: var(--text-muted);">No issues detected.</p>'}
+          ${flagsHtml}${flagsFooterHtml(result)}
         </div>
       </div>
       <div style="margin-top: 2rem; padding-top: 1rem; border-top: 1px solid var(--border); display: flex; gap: 1rem;">
@@ -414,7 +431,7 @@ async function launchCockpit(seriesUid) {
 
     // Render QA flags
     const flagsEl = document.getElementById('cockpit-flags');
-    if (info.flags && info.flags.length > 0) {
+    {
       const colours = { REJECT: '#ef4444', CONDITIONAL: '#f59e0b', INFO: '#3b82f6', ACCEPT: '#10b981', SKIPPED: '#64748b' };
       flagsEl.innerHTML = sortFlags(info.flags).map(f => {
         // Detect slice indicators like "(Slice 5)" or "(Slices 10-15)"
@@ -422,8 +439,9 @@ async function launchCockpit(seriesUid) {
         const clickable = match ? 'clickable' : '';
         const onclick = match ? `onclick="jumpToSlice(${match[1]})"` : '';
 
+        const muted = f.status === 'SKIPPED' ? 'flag-muted' : '';
         return `
-          <div class="cockpit-flag ${clickable}" ${onclick}>
+          <div class="cockpit-flag ${clickable} ${muted}" ${onclick}>
             <div class="cockpit-flag-dot" style="background:${colours[f.status] || '#94a3b8'}"></div>
             <div>
               <div class="cockpit-flag-name">${esc(f.name)}</div>
@@ -431,9 +449,7 @@ async function launchCockpit(seriesUid) {
             </div>
           </div>
         `;
-      }).join('');
-    } else {
-      flagsEl.innerHTML = '<p style="font-size:0.8rem;color:var(--text-muted);">No issues detected.</p>';
+      }).join('') + flagsFooterHtml(info, true);
     }
 
     _setCockpitButtonsEnabled(true);

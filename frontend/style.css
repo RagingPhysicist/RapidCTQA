@@ -146,6 +146,8 @@ td {
 .badge-accept { background: rgba(16, 185, 129, 0.2); color: var(--success); }
 .badge-conditional { background: rgba(245, 158, 11, 0.2); color: var(--warning); }
 .badge-reject { background: rgba(239, 68, 68, 0.2); color: var(--error); }
+.flag-muted { opacity: 0.55; }
+.passed-summary { color: var(--text-muted); opacity: 0.8; margin-top: 0.5rem; }
 .badge-info { background: rgba(59, 130, 246, 0.2); color: var(--info); }
 .badge-skipped { background: rgba(100, 116, 139, 0.2); color: var(--skipped); }
 .badge-pending { background: var(--glass); color: var(--text-muted); }

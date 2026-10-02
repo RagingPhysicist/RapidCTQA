@@ -66,6 +66,13 @@ class GasThresholds(_Section):
     max_gas_body_fraction: float = 0.10        # body-mask sanity: gas above this share of the evaluated body volume
     couch_exclusion_mm: float = 15.0
     pelvis_keywords: List[str] = ["PELVIS", "PROSTATE", "ABD", "ABDOMEN", "RECTUM", "GYN", "PELVIC"]
+    # Candidate cleaning (same for TotalSegmentator and rule-based masks)
+    air_threshold_hu: float = -500.0           # air = HU below this
+    min_thickness_mm: float = 4.0              # thinner (2 x max distance transform) -> sheet_like
+    min_depth_mm: float = 15.0                 # 90th-percentile depth below this -> too_shallow
+    skin_hu: float = -200.0                    # skin silhouette used for the cleft test
+    cleft_closing_mm: float = 5.0              # closing that ignores skin texture in the cleft test
+    cleft_fraction: float = 0.5                # share of a component in a skin concavity -> cleft
 
     @model_validator(mode="after")
     def _ordered(self):
@@ -117,6 +124,26 @@ class Thresholds(_Section):
     alignment: AlignmentThresholds = AlignmentThresholds()
 
 
+class DisplaySettings(_Section):
+    # Flag statuses left out of the on-screen report (dashboard, viewer,
+    # desktop cockpit). The PDF and qa_result.json always keep every check.
+    screen_hidden_statuses: List[str] = ["PASS", "ACCEPT", "INFO"]
+    show_passed_summary: bool = True           # "N checks passed - full list in PDF" line
+
+    @model_validator(mode="after")
+    def _valid_statuses(self):
+        from backend.status import ACTIONABLE, normalize_status
+        statuses = {normalize_status(s) for s in self.screen_hidden_statuses}
+        if statuses & ACTIONABLE:
+            raise ValueError("display.screen_hidden_statuses cannot hide CONDITIONAL or REJECT findings")
+        return self
+
+    @property
+    def hidden_statuses(self):
+        from backend.status import normalize_status
+        return frozenset(normalize_status(s) for s in self.screen_hidden_statuses)
+
+
 class ProtocolOverride(_Section):
     match: str                                 # case-insensitive substring of ProtocolName
     thresholds: Dict[str, Any]
@@ -136,6 +163,7 @@ class QAConfig(_Section):
     sop: Dict[str, Any] = {}
     thresholds: Thresholds = Thresholds()
     protocol_overrides: List[ProtocolOverride] = []
+    display: DisplaySettings = DisplaySettings()
     _resolved: Dict[str, Thresholds] = PrivateAttr(default_factory=dict)
 
     @model_validator(mode="after")

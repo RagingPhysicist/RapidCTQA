@@ -15,6 +15,7 @@
   - `reporter.py`: PDF report generation logic.
   - `models.py`: Pydantic models for API data structures.
 - `frontend/`: Static web assets (HTML, CSS, JS).
+- `tools/gas_debug.py`: Prints the CavityScout gas components of one series, with the reason each was kept or rejected (for tuning `thresholds.gas`).
 - `docs/`: Technical documentation.
 - `data/rtct/`: Default directory for storing received DICOM series (automatically created).
 - `reports/`: Generated PDF reports.
@@ -53,6 +54,8 @@ pytest
 - `backend/test_implant_auditor.py`: Tests for metal detection logic.
 - `backend/test_dicom_sender.py`: Tests for DICOM networking/egress.
 - `backend/test_refined_pca.py`: Tests for advanced geometry/alignment logic.
+- `backend/test_gas_cleft.py`: Gas candidate cleaning (cleft slit, inter-thigh pocket, couch zone, TotalSegmentator vs rule-based mask).
+- `backend/test_screen_flags.py`: On-screen flag filtering, PDF sections and problem-log issues.
 - `backend/test_alert_fatigue.py`: INFO status, one flag per check, protocol overrides, metal/gas/thickness tiers, truncation classes, roll phantoms and the 4DCT metal policy.
 - `backend/test_hardening.py`: Config validation, status normalisation, UID/path checks, listener and cleanup behaviour.
 - `backend/test_rejection.py`: Reject endpoint, CSRF and client allow-list.

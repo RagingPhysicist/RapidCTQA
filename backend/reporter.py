@@ -2,7 +2,7 @@ from fpdf import FPDF
 import datetime
 import os
 from backend.models import QAResult
-from backend.status import QAStatus, try_normalize_status
+from backend.status import QAStatus, is_attention_status, try_normalize_status
 
 STATUS_COLOURS = {
     QAStatus.ACCEPT: (16, 185, 129),
@@ -79,6 +79,34 @@ def _roll_text(metrics) -> str:
     return f"{metrics['roll_deg']:+.1f}°"
 
 
+def _flag_section(pdf, title, flags, empty_text, message_header="Message"):
+    pdf.set_fill_color(240, 240, 240)
+    pdf.set_font('helvetica', 'B', 14)
+    pdf.cell(0, 10, f' {title} ({len(flags)})', new_x="LMARGIN", new_y="NEXT", fill=True)
+    pdf.ln(3)
+    if not flags:
+        pdf.set_font('helvetica', 'I', 10)
+        pdf.cell(0, 8, empty_text, new_x="LMARGIN", new_y="NEXT")
+        pdf.ln(3)
+        return
+    # Native table prevents text overlapping and handles wrapping
+    with pdf.table(col_widths=(40, 30, 120)) as table:
+        pdf.set_font('helvetica', 'B', 11)
+        row = table.row()
+        row.cell('Agent')
+        row.cell('Status')
+        row.cell(message_header)
+        pdf.set_font('helvetica', '', 10)
+        for flag in flags:
+            row = table.row()
+            row.cell(flag.name)
+            pdf.set_text_color(*_status_colour(flag.status))
+            row.cell(str(flag.status))
+            pdf.set_text_color(0, 0, 0)
+            row.cell(flag.message or "")
+    pdf.ln(5)
+
+
 def generate_pdf_report(result: QAResult, output_path: str):
     pdf = QAPDFReport()
     pdf.add_page()
@@ -115,36 +143,14 @@ def generate_pdf_report(result: QAResult, output_path: str):
 
     pdf.ln(5)
 
-    # Agent Findings Section
-    pdf.set_fill_color(240, 240, 240)
-    pdf.set_font('helvetica', 'B', 14)
-    pdf.cell(0, 10, ' Agent Findings & Flags', new_x="LMARGIN", new_y="NEXT", fill=True)
-    pdf.ln(5)
-
-    # Use native table to prevent text overlapping and handle wrapping
-    with pdf.table(col_widths=(40, 30, 120)) as table:
-        # Header Row
-        pdf.set_font('helvetica', 'B', 11)
-        row = table.row()
-        row.cell('Agent')
-        row.cell('Status')
-        row.cell('Message')
-        
-        # Table Content
-        pdf.set_font('helvetica', '', 10)
-        for flag in result.flags:
-            row = table.row()
-            row.cell(flag.name)
-            
-            # Status Color
-            pdf.set_text_color(*_status_colour(flag.status))
-            row.cell(flag.status)
-            
-            # Reset Color for message
-            pdf.set_text_color(0, 0, 0)
-            row.cell(flag.message)
-
-    pdf.ln(5)
+    # Findings: every check, grouped. The on-screen report only shows the
+    # first and last groups; passing checks are listed here.
+    attention = [f for f in result.flags if is_attention_status(f.status)]
+    skipped = [f for f in result.flags if try_normalize_status(f.status) == QAStatus.SKIPPED]
+    passed = [f for f in result.flags if f not in attention and f not in skipped]
+    _flag_section(pdf, "Findings requiring attention", attention, "None - no findings require attention.")
+    _flag_section(pdf, "Passed checks", passed, "None.", message_header="Measured value")
+    _flag_section(pdf, "Skipped checks", skipped, "None.", message_header="Reason")
 
     # Metrics Section
     pdf.set_fill_color(240, 240, 240)
@@ -165,6 +171,7 @@ def generate_pdf_report(result: QAResult, output_path: str):
         ("Air HU Calibration Est.", f"{result.metrics.get('air_hu_estimate', 0.0):.1f} HU"),
         ("Fluid Median Density", f"{result.metrics.get('fluid_median_hu', 0.0):.1f} HU"),
         ("Gas Pockets Volume", f"{result.metrics.get('gas_volume_cc', 0.0):.1f} cc"),
+        ("Air Rejected as Non-Gas", f"{result.metrics.get('gas_rejected_cc', 0.0):.1f} cc"),
         ("Total Metal Volume", f"{result.metrics.get('metal_volume_cc', 0.0):.2f} cc"),
         ("Internal Metal Vol.", f"{result.metrics.get('metal_internal_cc', 0.0):.2f} cc"),
         ("Surface Metal Vol.", f"{result.metrics.get('metal_surface_cc', 0.0):.2f} cc"),

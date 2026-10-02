@@ -57,12 +57,13 @@ Every key in this file is read by the engine and validated at startup (`backend/
 | `noise` | `corner_roi_px` (20), `max_background_air_sd_hu` (15) |
 | `hu` | `air_range` ([-1100, -900]) |
 | `fluid` | `search_range_hu` ([0, 30]), `fallback_search_range_hu` ([0, 50]), `optimal_range_hu` ([0, 40]), `conditional_max_hu` (50) |
-| `gas` | `info_max_cc` (30), `large_cc` (75), `reject_cc` (150, `null` = never), `max_gas_body_fraction` (0.10), `couch_exclusion_mm` (15), `pelvis_keywords` |
+| `gas` | `info_max_cc` (30), `large_cc` (75), `reject_cc` (150, `null` = never), `max_gas_body_fraction` (0.10), `couch_exclusion_mm` (15), `pelvis_keywords`, `air_threshold_hu` (-500), `min_thickness_mm` (4), `min_depth_mm` (15), `skin_hu` (-200), `cleft_closing_mm` (5), `cleft_fraction` (0.5) |
 | `implants` | `metal_threshold_hu` (3000), `internal_info_max_cc` (2), `surface_info_max_cc` (10), `external_info_max_cc` (5), `pelvis_internal_conditional_cc` (5), `pelvis_keywords`, `internal_margin_mm` (10), `marker_max_volume_cc` (0.1) |
 | `alignment` | `info_deg` (1.5), `conditional_deg` (3.0), `min_correlation` (0.90), `search_range_deg` (30), `step_deg` (0.25), `edge_margin_deg` (0.5), `hu_floor` (-300), `hu_ceiling` (300), `downsample` (4) |
 
 How the tiers map to flags:
 - **Metal** (per class: internal / surface / external): none `ACCEPT`, below `<class>_info_max_cc` `INFO`, at or above `CONDITIONAL`. On scans matching `implants.pelvis_keywords`, internal metal at or above `pelvis_internal_conditional_cc` is `CONDITIONAL` even if an override raised the internal limit.
+- **Gas candidates**: air below `air_threshold_hu` inside the body mask. Components connected to outside air, thinner than `min_thickness_mm`, shallower than `min_depth_mm`, or lying in a skin concavity (`skin_hu`, `cleft_closing_mm`, `cleft_fraction`) are not counted. See [AGENTS_DETAIL.md](AGENTS_DETAIL.md#4-cavityscout); `tools/gas_debug.py` prints every component with its reason for tuning on real cases.
 - **Gas**: below `info_max_cc` `INFO`, from `info_max_cc` `CONDITIONAL` ("large" above `large_cc`), above `reject_cc` `REJECT`. If gas exceeds `max_gas_body_fraction` of the evaluated body volume, the body mask is suspect: one `CONDITIONAL` sanity flag, and the gas value is reported as unreliable `INFO`.
 - **Slice thickness**: above `absolute_max_mm` `REJECT`; otherwise `CONDITIONAL` only when `|measured - nominal_mm| > tolerance_mm`. With `nominal_mm: null` there is no thickness warning.
 - **Truncation**: anterior/posterior contact `REJECT`; lateral torso contact `CONDITIONAL` up to `max_lateral_truncation_z_mm` of z-extent (affected slices × slice spacing), `REJECT` beyond; arm/elbow with the torso clear and accessory-only contact are `INFO`.
@@ -86,7 +87,14 @@ protocol_overrides:
 
 The shipped file only contains the `ABD` gas override. Nominal slice thicknesses are site protocol settings: add one entry per protocol.
 
+### `display`
+On-screen report settings (web dashboard, web viewer, desktop cockpit). The PDF report and the stored `qa_result.json` always list every check.
+- `screen_hidden_statuses` (default `[PASS, ACCEPT, INFO]`): flag statuses not shown on screen. `SKIPPED` stays visible but muted. `CONDITIONAL` / `REJECT` can never be hidden (startup error).
+- `show_passed_summary` (default `true`): show one muted line "N checks passed - full list in PDF" under the findings.
+
+The PDF lists all checks in three groups: findings requiring attention (`CONDITIONAL` / `REJECT`), passed checks (`ACCEPT` / `INFO` with their measured values), and skipped checks with the reason.
+
 ### Status values
 Flags and series use one vocabulary, defined in `backend/status.py`: `ACCEPT`, `CONDITIONAL`, `REJECT`, plus `INFO` (reported value, never escalates) and `SKIPPED` (check not applicable) on flags, and `PENDING` / `INGESTING` (dashboard lifecycle). Results and logs written by older versions (`PASS`, `PASS_WITH_WARNING`, `FAIL_CRITICAL`) are converted when read, and those names are still accepted as API filter values.
 
-Every check emits one flag per series, every time. Only `CONDITIONAL` and `REJECT` escalate the series verdict, and only results that contain them are written to the problem log (`logs/`); a result re-analysed without them is removed from it.
+Every check emits one flag per series, every time. Only `CONDITIONAL` and `REJECT` escalate the series verdict, and only results that contain them are written to the problem log (`logs/`); a result re-analysed without them is removed from it. Log records keep the full flag list, but only `CONDITIONAL` / `REJECT` flags count as `issues` and match the issue-type filter.

@@ -6,7 +6,7 @@ import threading
 from datetime import datetime
 from typing import List, Dict, Any, Optional
 
-from backend.status import is_actionable, try_normalize_status
+from backend.status import is_attention_status, try_normalize_status
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # Daily logs contain patient names and IDs; logs/ is git-ignored.
@@ -29,10 +29,11 @@ def log_qa_result(
     """
     Record a QA result in the problem log.
 
-    Only results with an actionable flag (CONDITIONAL / REJECT) are written,
-    with just those flags as issues. A result without one removes any earlier
-    record for the same series (for example after re-analysis or a 4DCT
-    metal downgrade). Returns the written record, or None.
+    Only results with an attention flag (CONDITIONAL / REJECT) are written.
+    The record keeps the full flag list; ``issues`` holds only the attention
+    flags (ACCEPT / INFO / SKIPPED never count as issues). A result without
+    one removes any earlier record for the same series (for example after
+    re-analysis or a 4DCT metal downgrade). Returns the written record, or None.
     """
     if timestamp is None:
         ts_dt = datetime.now()
@@ -51,17 +52,16 @@ def log_qa_result(
         f_name = getattr(f, "name", str(f.get("name") if isinstance(f, dict) else ""))
         f_status = getattr(f, "status", str(f.get("status") if isinstance(f, dict) else ""))
         f_msg = getattr(f, "message", str(f.get("message") if isinstance(f, dict) else ""))
-        if not is_actionable(f_status):
-            continue
-        f_status = str(try_normalize_status(f_status))
+        f_status = str(try_normalize_status(f_status) or f_status)
         flags_list.append({"name": f_name, "status": f_status, "message": f_msg})
-        issues.append(f"{f_name}: {f_msg}" if f_msg else f_name)
+        if is_attention_status(f_status):
+            issues.append(f"{f_name}: {f_msg}" if f_msg else f_name)
 
     series_uid = getattr(result, "series_uid", "")
     status = str(try_normalize_status(getattr(result, "status", "")) or getattr(result, "status", "UNKNOWN"))
 
     record = None
-    if flags_list:
+    if issues:
         record = {
             "timestamp": timestamp,
             "date": date_str,
@@ -160,6 +160,8 @@ def query_logs(
             target_issue = issue_type.strip().lower()
             match_flag = False
             for f in r.get("flags", []):
+                if not is_attention_status(f.get("status", "")):
+                    continue  # records keep every check; only attention flags are issues
                 fname = f.get("name", "").lower()
                 fmsg = f.get("message", "").lower()
                 fstat = f.get("status", "").lower()
