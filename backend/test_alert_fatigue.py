@@ -97,7 +97,7 @@ def test_problem_log_only_keeps_actionable_results():
     problem = info_only.model_copy(update={"status": "CONDITIONAL", "flags": info_only.flags + [
         QAFlag(name="AlignmentAuditor", status="CONDITIONAL", message="ROLL_ALERT")]})
     record = log_qa_result(problem)
-    assert [f["status"] for f in record["flags"]] == ["CONDITIONAL"]
+    assert [f["status"] for f in record["flags"]] == ["INFO", "ACCEPT", "CONDITIONAL"]  # full list kept
     assert record["issues"] == ["AlignmentAuditor: ROLL_ALERT"]
     assert sum(r["series_uid"] == uid for r in get_all_logs()) == 1
 

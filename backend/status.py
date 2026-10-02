@@ -60,6 +60,26 @@ def is_actionable(value) -> bool:
     return try_normalize_status(value) in ACTIONABLE
 
 
+# A finding needs attention when it is CONDITIONAL or REJECT (legacy:
+# PASS_WITH_WARNING, FAIL_CRITICAL). Same set as ACTIONABLE.
+is_attention_status = is_actionable
+
+# Flags not shown on screen by default (the PDF always lists every check).
+# Configurable through ctqa.yaml display.screen_hidden_statuses.
+DEFAULT_SCREEN_HIDDEN = frozenset({QAStatus.ACCEPT, QAStatus.INFO})
+
+
+def screen_flags(flags, hidden=DEFAULT_SCREEN_HIDDEN) -> list:
+    """Flags for on-screen display: everything except the ``hidden`` statuses.
+
+    Attention statuses (CONDITIONAL / REJECT) are never hidden.
+    """
+    def visible(f):
+        status = try_normalize_status(getattr(f, "status", None) if not isinstance(f, dict) else f.get("status"))
+        return status in ACTIONABLE or status not in hidden
+    return [f for f in flags if visible(f)]
+
+
 def normalize_status(value) -> QAStatus:
     """Map any current or legacy status string onto :class:`QAStatus`.
 

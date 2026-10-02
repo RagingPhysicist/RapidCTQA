@@ -11,7 +11,7 @@ from backend.dicom_sender import send_dicom_series
 # Configuration: same storage resolution and thresholds as the web backend
 from backend import settings
 from backend.qa_config import load_qa_config
-from backend.status import QAStatus, try_normalize_status
+from backend.status import is_attention_status
 
 STORAGE_DIR = settings.STORAGE_DIR
 METAL_THRESHOLD = load_qa_config(settings.QA_CONFIG_PATH).thresholds.implants.metal_threshold_hu
@@ -245,11 +245,15 @@ class ClinicalTriageApp(ctk.CTk):
             self.flag_box.insert("end", f"PROTOCOL: {result.protocol}\n")
             self.flag_box.insert("end", "-"*30 + "\n")
             
-            for flag in result.flags:
-                status = try_normalize_status(flag.status)
-                color = "RED" if status == QAStatus.REJECT else "YELLOW" if status == QAStatus.CONDITIONAL else "BLUE" if status == QAStatus.INFO else "GRAY" if status == QAStatus.SKIPPED else "GREEN"
+            # Same screen view as the web dashboard: passing checks are only in the PDF
+            screen = self.engine.screen_view(result)
+            if not any(is_attention_status(f.status) for f in screen.flags):
+                self.flag_box.insert("end", "No issues detected.\n\n")
+            for flag in screen.flags:
                 self.flag_box.insert("end", f"[{flag.status}] {flag.name}\n")
                 self.flag_box.insert("end", f" >> {flag.message}\n\n")
+            if screen.show_passed_summary and screen.passed_checks:
+                self.flag_box.insert("end", f"{screen.passed_checks} checks passed - full list in PDF\n")
             
             self.status_lbl.configure(text="REVIEW REQUIRED", text_color="#ffc107")
         except Exception as e:

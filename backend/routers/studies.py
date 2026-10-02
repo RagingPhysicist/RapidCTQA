@@ -8,7 +8,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from backend import settings, state
 from backend.engine import CT_IMAGE_STORAGE
 from backend.fourdct import FourDCTGroup, detect_fourdct_groups
-from backend.models import FourDCTSummary, IngestionStatus, QAResult, StudySummary, TemporalPhaseInfo
+from backend.models import FourDCTSummary, IngestionStatus, ScreenQAResult, StudySummary, TemporalPhaseInfo
 from backend.security import valid_series_uid
 from backend.status import QAStatus, severity, worst_status
 
@@ -142,7 +142,7 @@ async def get_studies(background_tasks: BackgroundTasks) -> List[Any]:
     return [item.model_dump(mode="json") for item in result_items]
 
 
-@router.get("/studies/{series_uid}", response_model=QAResult)
+@router.get("/studies/{series_uid}", response_model=ScreenQAResult)
 async def get_study_detail(series_uid: str = Depends(valid_series_uid)):
     if series_uid not in state.results_cache:
         # Run validation if files exist but no result is cached yet
@@ -150,7 +150,8 @@ async def get_study_detail(series_uid: str = Depends(valid_series_uid)):
             state.on_series_received(series_uid)
 
     if series_uid in state.results_cache:
-        return state.results_cache[series_uid]
+        # Screen view: attention findings (and SKIPPED) only; passing checks are in the PDF
+        return state.engine.screen_view(state.results_cache[series_uid])
     raise HTTPException(status_code=404, detail="Study not found or not yet processed")
 
 

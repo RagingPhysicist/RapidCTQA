@@ -50,7 +50,9 @@ async def viewer_info(series_uid: str = Depends(valid_series_uid)):
             except Exception:
                 continue
 
-    flags = [{"name": f.name, "status": f.status, "message": f.message} for f in result.flags] if result else []
+    # Screen view: attention findings (and SKIPPED) only; passing checks are in the PDF
+    screen = state.engine.screen_view(result) if result else None
+    flags = [{"name": f.name, "status": f.status, "message": f.message} for f in screen.flags] if screen else []
 
     wl_presets = {}
     try:
@@ -87,6 +89,8 @@ async def viewer_info(series_uid: str = Depends(valid_series_uid)):
         "protocol": protocol,
         "slice_count": len(dicom_files),
         "flags": flags,
+        "passed_checks": screen.passed_checks if screen else 0,
+        "show_passed_summary": screen.show_passed_summary if screen else True,
         "wl_presets": wl_presets,
         "has_rtss": has_rtss,
         "reference_point": reference_point,
